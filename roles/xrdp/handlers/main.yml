@@ -1,0 +1,7 @@
+---
+# Handlers only run when a task notifies them, and only once per play.
+
+- name: Restart xrdp
+  ansible.builtin.systemd_service:
+    name: xrdp
+    state: restarted

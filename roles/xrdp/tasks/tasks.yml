@@ -1,0 +1,91 @@
+---
+# Package names live in group_vars/all.yml.
+
+- name: Install xrdp
+  ansible.builtin.apt:
+    name: "{{ xrdp_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# xrdp reads /etc/ssl/private/ssl-cert-snakeoil.key, which is only readable by
+# the ssl-cert group. Without this you get TLS errors the moment a client
+# connects — the package does not do it for you.
+- name: Allow xrdp to read the TLS certificate
+  ansible.builtin.user:
+    name: xrdp
+    groups: ssl-cert
+    append: true
+  when: xrdp_add_to_ssl_cert_group | default(true)
+  notify: Restart xrdp
+
+# xrdp starts whatever ~/.xsession says. With nothing there you authenticate
+# fine and land on an empty grey screen — by far the most common reason people
+# think xrdp is broken. This is written for the real login user, not root.
+- name: Set the RDP session to LXDE for the login user
+  ansible.builtin.copy:
+    content: "{{ xrdp_session_command }}\n"
+    dest: "/home/{{ target_user }}/.xsession"
+    owner: "{{ target_user }}"
+    group: "{{ target_user }}"
+    mode: "0644"
+  vars:
+    target_user: "{{ ansible_facts.env.SUDO_USER | default(ansible_facts.user_id) }}"
+  when: (ansible_facts.env.SUDO_USER | default('')) not in ['', 'root']
+
+- name: Note that no .xsession was written
+  ansible.builtin.debug:
+    msg: >-
+      Could not determine a non-root login user, so ~/.xsession was not written.
+      Do it by hand or RDP will show a grey screen:
+      echo "{{ xrdp_session_command }}" > ~/.xsession
+  when: (ansible_facts.env.SUDO_USER | default('')) in ['', 'root']
+
+- name: Enable and start xrdp
+  ansible.builtin.systemd_service:
+    name: xrdp
+    enabled: true
+    state: started
+    daemon_reload: true
+
+# --- firewall ----------------------------------------------------------------
+# Only touched when ufw is actually installed and active; an RDP server you
+# cannot reach is not much use.
+
+# Add the allow rule unconditionally, not only when ufw is already active.
+# The hardening role enables ufw with "default deny incoming" AFTER this role
+# runs; if the rule were gated on ufw being active it would not exist yet, and
+# enabling ufw would then lock out RDP. ufw stores an allow rule fine while
+# inactive and applies it on enable.
+- name: Open the RDP port in ufw
+  community.general.ufw:
+    rule: allow
+    port: "{{ xrdp_port }}"
+    proto: tcp
+  when: xrdp_configure_firewall | default(true)
+
+# --- verify ------------------------------------------------------------------
+
+- name: Check that xrdp is listening
+  ansible.builtin.wait_for:
+    port: "{{ xrdp_port }}"
+    host: 127.0.0.1
+    timeout: 15
+  register: xrdp_listening
+  failed_when: false
+
+- name: Fail if xrdp is not listening
+  ansible.builtin.fail:
+    msg: |
+      xrdp is installed but nothing is listening on port {{ xrdp_port }}.
+      Check the service:
+        systemctl status xrdp
+        journalctl -u xrdp -n 50
+  when: xrdp_listening is failed
+
+- name: Show how to connect
+  ansible.builtin.debug:
+    msg: >-
+      xrdp is listening on port {{ xrdp_port }}. Connect with any RDP client to
+      {{ ansible_facts.default_ipv4.address | default('this host') }}:{{ xrdp_port }}
+      and log in with your normal Linux username and password.

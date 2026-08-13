@@ -1,0 +1,77 @@
+---
+# Oh My Zsh and friends. zsh/tmux/eza/colorize are installed via apps_packages;
+# this role does the per-user config.
+#
+# Everything runs as the login user, never root — otherwise Oh My Zsh lands in
+# /root and your actual shell stays plain. The whole role is skipped if we
+# cannot identify a real user.
+
+- name: Identify the login user
+  ansible.builtin.set_fact:
+    zsh_user: "{{ ansible_facts.env.SUDO_USER | default('') }}"
+
+- name: Skip zsh setup if run without a real user
+  ansible.builtin.debug:
+    msg: "No SUDO_USER — zsh role skipped. Run via sudo as your normal user."
+  when: zsh_user in ['', 'root']
+
+- name: Configure zsh for the login user
+  when: zsh_user not in ['', 'root']
+  become: true
+  become_user: "{{ zsh_user }}"
+  block:
+    - name: Resolve the user's home directory
+      ansible.builtin.set_fact:
+        zsh_home: "/home/{{ zsh_user }}"
+
+    - name: Install Oh My Zsh (unattended)
+      ansible.builtin.shell: |
+        set -o pipefail
+        RUNZSH=no CHSH=no KEEP_ZSHRC=yes \
+          sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
+      args:
+        executable: /bin/bash
+        creates: "{{ zsh_home }}/.oh-my-zsh"
+
+    - name: Clone the custom plugins
+      ansible.builtin.git:
+        repo: "{{ item.repo }}"
+        dest: "{{ zsh_home }}/.oh-my-zsh/custom/plugins/{{ item.name }}"
+        depth: 1
+        version: master
+      loop:
+        - { name: zsh-autosuggestions, repo: "https://github.com/zsh-users/zsh-autosuggestions" }
+        - { name: zsh-syntax-highlighting, repo: "https://github.com/zsh-users/zsh-syntax-highlighting" }
+      failed_when: false
+
+    - name: Set the plugins line
+      ansible.builtin.lineinfile:
+        path: "{{ zsh_home }}/.zshrc"
+        regexp: '^plugins='
+        line: "plugins=({{ zsh_plugins | join(' ') }})"
+        create: true
+
+    - name: Add colorize + tmux settings and the eza alias
+      ansible.builtin.blockinfile:
+        path: "{{ zsh_home }}/.zshrc"
+        marker: "# {mark} ANSIBLE_ZSH"
+        create: true
+        block: |
+          ZSH_COLORIZE_STYLE="colorful"
+          ZSH_TMUX_AUTOSTART=true
+          alias la="eza -la --color=always --group-directories-first"
+
+    - name: Point tmux at zsh
+      ansible.builtin.lineinfile:
+        path: "{{ zsh_home }}/.tmux.conf"
+        line: "set-option -g default-shell /bin/zsh"
+        create: true
+
+# chsh needs root, so it sits outside the become_user block.
+- name: Make zsh the default shell
+  ansible.builtin.user:
+    name: "{{ zsh_user }}"
+    shell: /bin/zsh
+  when:
+    - zsh_user not in ['', 'root']
+    - zsh_make_default_shell | default(true)

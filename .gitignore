@@ -1,0 +1,13 @@
+# Ansible
+*.retry
+.vault_pass
+*.vault
+
+# Editors
+*.swp
+*~
+.idea/
+.vscode/
+
+# OS
+.DS_Store

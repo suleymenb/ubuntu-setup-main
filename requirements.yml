@@ -1,0 +1,6 @@
+---
+# Pinned deliberately: "reproducible" in the README has to mean something.
+# Bump these on purpose, not by accident on a random Tuesday.
+collections:
+  - name: community.general
+    version: ">=10.0.0,<12.0.0"

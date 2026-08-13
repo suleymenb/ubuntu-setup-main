@@ -1,0 +1,140 @@
+---
+# Single source of truth for everything this playbook manages.
+# The preflight role validates these before anything is installed, and
+# verify.sh reads the same file, so they cannot drift apart.
+
+# --- preflight ---------------------------------------------------------------
+preflight_min_free_gb: 4
+preflight_hosts:
+  - archive.ubuntu.com
+  - security.ubuntu.com
+
+# --- desktop -----------------------------------------------------------------
+
+desktop_packages:
+  - lxde
+desktop_systemd_target: graphical.target
+
+# --- apps --------------------------------------------------------------------
+apps_ppas:
+  - ppa:unit193/encryption
+
+apps_packages:
+  - vlc
+  - veracrypt
+  # C toolchain + cross-compiling / offensive-security tooling
+  - build-essential
+  - gcc
+  - g++
+  - gdb
+  - make
+  - clang
+  - git
+  - mingw-w64          # cross-compile Windows PE binaries from Linux
+  - nasm               # x86 assembler
+  - default-jdk
+  - default-jre
+  - proxychains4       # note: package is proxychains4, binary is proxychains
+  - socat
+  - p7zip-full
+  - gnupg
+  - curl
+  - wget
+  - dirmngr
+  - software-properties-common
+  - apt-transport-https
+  - lsb-release
+  - ca-certificates
+  - libfuse-dev
+  - dmsetup
+  - python3-shodan     # shodan CLI
+  - ufw
+  # terminal / shell (eza is in the 24.04+ repos — no custom repo needed)
+  - eza
+  - colorize
+  - guake
+  - tmux
+  - zsh
+  - gedit
+  - keepass2           # password manager
+
+# Snap packages. classic: true maps to --classic, which IDEs need because they
+# require access outside the snap sandbox.
+apps_snaps:
+  - name: clion
+    classic: true
+
+# Packages with no apt source at all, installed from a GitHub release .deb.
+# The version is resolved from the API at run time, so this never goes stale.
+apps_github_debs:
+  - name: obsidian
+    repo: obsidianmd/obsidian-releases
+    asset_match: 'amd64\.deb'
+    architectures: [amd64]
+
+# --- virtualisation ----------------------------------------------------------
+# Own role and own tag: this is a different concern from installing apps, and
+# it needs group membership and a running daemon, not just packages.
+virt_packages:
+  - qemu-system-x86
+  - libvirt-daemon-system
+  - libvirt-clients
+  - bridge-utils
+  - virt-manager
+  - cpu-checker          # provides kvm-ok
+
+# Without these virt-manager sees no hypervisor and every VM action asks for
+# a password. Only applies to new logins.
+virt_user_groups:
+  - libvirt
+  - kvm
+
+# --- jetbrains ---------------------------------------------------------------
+# Installed from the JetBrains apt repo (added by preflight, like the PPAs).
+# Trim this list to what you actually use — each IDE is 1-2 GB.
+jetbrains_ides:
+  - clion              # C/C++ — your main one
+# - rustrover
+# - intellij-idea-ultimate
+# - pycharm-professional
+
+# --- shodan ------------------------------------------------------------------
+# API key is a SECRET — never commit it. Set it at run time instead:
+#   sudo ansible-playbook playbook.yml -e shodan_api_key=YOUR_KEY
+# or export SHODAN_API_KEY and the role picks it up. Empty = skip shodan init.
+shodan_api_key: "{{ lookup('env', 'SHODAN_API_KEY') | default('', true) }}"
+
+# --- zsh ---------------------------------------------------------------------
+# Oh My Zsh + plugins, configured for the login user (not root).
+zsh_plugins:
+  - git
+  - eza
+  - sudo
+  - colorize
+  - tmux
+  - zsh-autosuggestions
+  - zsh-syntax-highlighting
+# Set zsh as the login shell. Off by default — it changes how you log in, so
+# opt in when you are sure.
+zsh_make_default_shell: true
+
+# --- hardening ---------------------------------------------------------------
+# Privacy / anti-forensics config from the old script. All opt-out.
+#
+# NOTE for malware study: disabling logs also means you lose the trail when a
+# sample misbehaves. Consider leaving logs ON inside your analysis VM and only
+# hardening the host. Flip any of these to false to keep that subsystem.
+hardening_disable_sleep: true       # mask sleep/suspend/hibernate targets
+hardening_disable_logging: true     # journald, rsyslog, auditd off + truncate logs
+hardening_firewall: true            # ufw: deny incoming, allow outgoing
+
+# --- xrdp --------------------------------------------------------------------
+xrdp_packages:
+  - xrdp
+xrdp_port: 3389
+xrdp_session_command: "startlxde"
+xrdp_add_to_ssl_cert_group: true
+xrdp_configure_firewall: true
+
+# --- reboot ------------------------------------------------------------------
+ubuntu_auto_reboot: false

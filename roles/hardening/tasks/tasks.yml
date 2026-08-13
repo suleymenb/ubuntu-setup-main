@@ -1,0 +1,80 @@
+---
+# Privacy / anti-forensics config. Every block is guarded by a toggle in
+# group_vars/all.yml so you can keep any subsystem you still want.
+
+# --- sleep -------------------------------------------------------------------
+- name: Disable sleep, suspend and hibernate
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    masked: true
+  loop:
+    - sleep.target
+    - suspend.target
+    - hibernate.target
+    - hybrid-sleep.target
+  when: hardening_disable_sleep | default(true)
+
+# --- logging -----------------------------------------------------------------
+# journald first: set Storage=none so nothing is written to disk, then stop and
+# mask the units. rsyslog/auditd are only touched if present.
+- name: Set journald storage to none
+  ansible.builtin.lineinfile:
+    path: /etc/systemd/journald.conf
+    regexp: '^#?Storage='
+    line: 'Storage=none'
+    create: true
+  when: hardening_disable_logging | default(true)
+  register: journald_conf
+
+- name: Mask the logging services
+  ansible.builtin.systemd_service:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+    masked: true
+  loop:
+    - systemd-journald.service
+    - rsyslog.service
+    - auditd.service
+  failed_when: false          # not all of these exist on every install
+  when: hardening_disable_logging | default(true)
+
+- name: Vacuum existing journal entries
+  ansible.builtin.command: journalctl --vacuum-time=1s
+  changed_when: false
+  failed_when: false
+  when: hardening_disable_logging | default(true)
+
+# Truncate rather than delete: keeps ownership/permissions the services expect
+# if you ever turn logging back on.
+- name: Truncate known log files
+  ansible.builtin.shell: |
+    set -uo pipefail
+    for f in /var/log/syslog /var/log/messages /var/log/auth.log \
+             /var/log/kern.log /var/log/boot.log /var/log/user.log \
+             /var/log/wtmp /var/log/btmp /var/log/lastlog /var/log/faillog; do
+      [ -f "$f" ] && : > "$f"
+    done
+    exit 0
+  args:
+    executable: /bin/bash
+  changed_when: false
+  when: hardening_disable_logging | default(true)
+
+# --- firewall ----------------------------------------------------------------
+# ufw itself is installed via apps_packages; here we set the policy.
+# Note: xrdp opens 3389 in its own role — that runs after this, so RDP still
+# works despite "deny incoming".
+- name: Set ufw default policies
+  community.general.ufw:
+    direction: "{{ item.dir }}"
+    policy: "{{ item.policy }}"
+  loop:
+    - { dir: incoming, policy: deny }
+    - { dir: outgoing, policy: allow }
+  when: hardening_firewall | default(true)
+
+- name: Enable ufw
+  community.general.ufw:
+    state: enabled
+  when: hardening_firewall | default(true)

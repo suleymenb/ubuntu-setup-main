@@ -1,0 +1,37 @@
+---
+# Package names live in group_vars/all.yml.
+
+- name: Install the desktop environment
+  ansible.builtin.apt:
+    name: "{{ desktop_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+  register: desktop_install
+
+# `systemctl set-default` has no dedicated module, so read the current value
+# first and only write when it differs. Otherwise this reports "changed" on
+# every single run and you can never tell a real change from noise.
+- name: Check the current systemd default target
+  ansible.builtin.command: systemctl get-default
+  register: current_target
+  changed_when: false
+
+- name: Set the default systemd target to graphical
+  ansible.builtin.command: "systemctl set-default {{ desktop_systemd_target }}"
+  when: current_target.stdout | trim != desktop_systemd_target
+  register: target_set
+
+# The target only takes effect at boot, so record that a reboot is due and let
+# the playbook decide what to do with it — see ubuntu_auto_reboot.
+- name: Record that a reboot is required
+  ansible.builtin.set_fact:
+    reboot_required: true
+  when: target_set is changed
+
+- name: Show the desktop state
+  ansible.builtin.debug:
+    msg: >-
+      {{ desktop_packages | join(', ') }} installed.
+      Default target: {{ desktop_systemd_target if (target_set is changed) else (current_target.stdout | trim) }}
+      {{ '(reboot required)' if (reboot_required | default(false)) else '' }}

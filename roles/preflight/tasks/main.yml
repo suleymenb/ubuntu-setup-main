@@ -1,0 +1,166 @@
+---
+# Fail fast, and fail with the complete picture.
+# Validates the environment and every package name up front, so you get one
+# list of everything that is wrong before a single package is installed.
+
+- name: Assert this is a Debian-family system
+  ansible.builtin.assert:
+    that: ansible_facts.os_family == 'Debian'
+    fail_msg: >-
+      This playbook targets Ubuntu/Debian only
+      (detected: {{ ansible_facts.os_family }} / {{ ansible_facts.distribution }}).
+    quiet: true
+
+- name: Assert we are running as root
+  ansible.builtin.assert:
+    that: ansible_facts.effective_user_id == 0
+    fail_msg: >-
+      This playbook needs root. Run it as:
+      sudo ansible-playbook playbook.yml
+    quiet: true
+
+- name: Measure free disk space on /
+  ansible.builtin.command: df -BG --output=avail /
+  register: df_root
+  changed_when: false
+
+- name: Assert there is enough free disk space
+  ansible.builtin.assert:
+    that: (df_root.stdout_lines[1] | trim | regex_replace('G$', '') | int) >= (preflight_min_free_gb | int)
+    fail_msg: >-
+      Only {{ df_root.stdout_lines[1] | trim }} free on / —
+      at least {{ preflight_min_free_gb }}G is needed for a desktop install.
+    quiet: true
+
+- name: Check that the apt mirrors are reachable
+  ansible.builtin.wait_for:
+    host: "{{ item }}"
+    port: 80
+    timeout: 8
+  loop: "{{ preflight_hosts }}"
+  register: net_check
+  failed_when: false
+
+- name: Report unreachable mirrors
+  ansible.builtin.fail:
+    msg: |
+      Cannot reach these apt mirrors — check your network, proxy or DNS:
+      {{ net_check.results | selectattr('failed', 'defined') | selectattr('failed')
+         | map(attribute='item') | list | join(', ') }}
+  when: net_check.results | selectattr('failed', 'defined') | selectattr('failed') | list | length > 0
+
+- name: Update the apt cache
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+
+# PPAs have to exist before their packages can be validated at all — veracrypt
+# is not in the Ubuntu repos, so without this it would look like a typo.
+#
+# Deliberately add-apt-repository rather than the apt_repository module: that
+# module fetches the signing key over the legacy gpg keyserver protocol
+# (hkp://keyserver.ubuntu.com:80), which fails with "Unable to get required
+# signing key / nothing exported" on hosts where port 80 to the keyserver is
+# blocked or the keyserver is having a bad day. add-apt-repository uses the
+# Launchpad API over HTTPS and writes a deb822 .sources file with Signed-By.
+- name: Ensure add-apt-repository is available
+  ansible.builtin.apt:
+    name: software-properties-common
+    state: present
+  when: (apps_ppas | default([])) | length > 0
+
+- name: Check which PPAs are already configured
+  ansible.builtin.shell: |
+    set -o pipefail
+    if grep -rqs "{{ item | regex_replace('^ppa:', '') }}" \
+         /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null; then
+      echo PRESENT
+    else
+      echo ABSENT
+    fi
+  args:
+    executable: /bin/bash
+  loop: "{{ apps_ppas | default([]) }}"
+  register: ppa_present
+  changed_when: false
+
+- name: Add the missing PPAs
+  ansible.builtin.command: "add-apt-repository -y {{ item.item }}"
+  loop: "{{ ppa_present.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item }}"
+  when: "'ABSENT' in (item.stdout | default(''))"
+  register: ppa_added
+
+- name: Update the apt cache after adding PPAs
+  ansible.builtin.apt:
+    update_cache: true
+  when: ppa_added is changed
+
+# Catching a typo here costs seconds. Catching it during the install costs a
+# partially configured desktop.
+- name: Validate every package name exists
+  ansible.builtin.command: "apt-cache show {{ item }}"
+  loop: >-
+    {{ desktop_packages + xrdp_packages + (apps_packages | default([]))
+       + (virt_packages | default([])) }}
+  register: pkg_check
+  changed_when: false
+  failed_when: false
+
+- name: Report every package name that does not exist
+  ansible.builtin.fail:
+    msg: |
+      These packages are not available from the configured apt sources:
+        {{ pkg_check.results | selectattr('rc', 'ne', 0) | map(attribute='item') | list | join('\n  ') }}
+      Nothing has been installed. Fix the names in group_vars/all.yml.
+  when: pkg_check.results | selectattr('rc', 'ne', 0) | list | length > 0
+
+# Snaps come from a different store than apt, so apt-cache cannot vouch for
+# them. Check snapd is usable and that each name actually exists, otherwise a
+# typo only surfaces halfway through the apps role.
+- name: Check that snapd is available
+  ansible.builtin.command: snap version
+  register: snap_version
+  changed_when: false
+  failed_when: false
+  when: (apps_snaps | default([])) | length > 0
+
+- name: Report missing snapd
+  ansible.builtin.fail:
+    msg: |
+      snapd is not available but {{ (apps_snaps | default([])) | length }} snap(s)
+      are configured. Install it first:  apt install snapd
+  when:
+    - (apps_snaps | default([])) | length > 0
+    - snap_version.rc | default(0) != 0
+
+- name: Validate every snap name exists
+  ansible.builtin.command: "snap info {{ item.name }}"
+  loop: "{{ apps_snaps | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: snap_check
+  changed_when: false
+  failed_when: false
+  when: snap_version.rc | default(1) == 0
+
+- name: Report every snap name that does not exist
+  ansible.builtin.fail:
+    msg: |
+      These snaps do not exist in the store:
+        {{ snap_check.results | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0)
+           | map(attribute='item.name') | list | join('\n  ') }}
+      Nothing has been installed. Fix the names in group_vars/all.yml.
+  when:
+    - snap_check.results is defined
+    - snap_check.results | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | list | length > 0
+
+- name: Preflight passed
+  ansible.builtin.debug:
+    msg: >-
+      Preflight OK — {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }},
+      root, disk, mirrors, {{ (apps_ppas | default([])) | length }} PPA(s),
+      {{ (desktop_packages + xrdp_packages + (apps_packages | default([]))
+          + (virt_packages | default([]))) | length }} package(s) and
+      {{ (apps_snaps | default([])) | length }} snap(s) all validated.

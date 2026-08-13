@@ -1,0 +1,54 @@
+---
+# JetBrains IDEs from the official apt repo. IDE names live in group_vars.
+# Repo setup lives here (not preflight) because it is JetBrains-specific.
+
+- name: Fetch the JetBrains repo signing key
+  ansible.builtin.get_url:
+    url: https://s3.eu-central-1.amazonaws.com/jetbrains-ppa/0xA6E8698A.pub.asc
+    dest: /tmp/jetbrains.asc
+    mode: "0644"
+  register: jb_key_dl
+  failed_when: false
+  when: (jetbrains_ides | default([])) | length > 0
+
+- name: Install the key into a keyring
+  ansible.builtin.shell: |
+    set -o pipefail
+    gpg --dearmor < /tmp/jetbrains.asc \
+      > /usr/share/keyrings/jetbrains-ppa-archive-keyring.gpg
+  args:
+    executable: /bin/bash
+    creates: /usr/share/keyrings/jetbrains-ppa-archive-keyring.gpg
+  when:
+    - (jetbrains_ides | default([])) | length > 0
+    - jb_key_dl is succeeded
+
+- name: Add the JetBrains apt source
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [signed-by=/usr/share/keyrings/jetbrains-ppa-archive-keyring.gpg]
+      http://jetbrains-ppa.s3-website.eu-central-1.amazonaws.com any main
+    filename: jetbrains-ppa
+    state: present
+    update_cache: true
+  when:
+    - (jetbrains_ides | default([])) | length > 0
+    - jb_key_dl is succeeded
+
+- name: Install JetBrains IDEs
+  ansible.builtin.apt:
+    name: "{{ jetbrains_ides }}"
+    state: present
+  when:
+    - (jetbrains_ides | default([])) | length > 0
+    - jb_key_dl is succeeded
+
+- name: Warn if the JetBrains repo could not be reached
+  ansible.builtin.debug:
+    msg: >-
+      Could not fetch the JetBrains signing key, so the IDEs were skipped.
+      Check network access to s3.eu-central-1.amazonaws.com and re-run
+      --tags jetbrains.
+  when:
+    - (jetbrains_ides | default([])) | length > 0
+    - jb_key_dl is not succeeded

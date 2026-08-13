@@ -1,0 +1,22 @@
+---
+# Thin wrapper. The real work lives in tasks.yml.
+- name: hardening
+  block:
+    - name: Run the hardening tasks
+      ansible.builtin.include_tasks: tasks.yml
+
+  rescue:
+    - name: Record that the hardening role failed
+      ansible.builtin.set_fact:
+        ubuntu_failed_roles: >-
+          {{ (ubuntu_failed_roles | default([])) + [{
+               'role': 'hardening',
+               'task': ansible_failed_task.name | default('unknown task'),
+               'msg': (ansible_failed_result.msg | default('no message')) | string | truncate(200)
+             }] }}
+
+    - name: Warn that hardening failed but the run continues
+      ansible.builtin.debug:
+        msg: >-
+          Role 'hardening' FAILED at "{{ ansible_failed_task.name | default('unknown task') }}".
+          Continuing with the remaining roles; full report at the end.

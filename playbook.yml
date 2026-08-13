@@ -1,0 +1,81 @@
+- name: Ubuntu setup
+  hosts: ubuntu
+  gather_facts: true
+
+  # Everything here writes to /etc or installs packages, so the whole play
+  # runs as root. Run it as: sudo ansible-playbook playbook.yml
+  # (see the README for why -K is unreliable on Ubuntu's PAM stack)
+  become: true
+
+  roles:
+    # Validates the environment before anything is installed, so a bad
+    # package name or a missing repo fails in seconds instead of minutes.
+    - role: preflight
+      tags: [always]
+    - role: desktop
+      tags: [desktop]
+    - role: apps
+      tags: [apps]
+    - role: jetbrains
+      tags: [jetbrains, ides]
+    - role: virtualisation
+      tags: [virtualisation, virt]
+    - role: zsh
+      tags: [zsh, terminal]
+    - role: xrdp
+      tags: [xrdp]
+    # Last: it changes firewall policy and disables logging/sleep, so let
+    # everything else install and settle first.
+    - role: hardening
+      tags: [hardening]
+
+  # post_tasks run after every role, including after a role failed — each role
+  # catches its own failure in a rescue block.
+  post_tasks:
+    - name: All roles completed successfully
+      ansible.builtin.debug:
+        msg: "All roles completed without errors."
+      when: (ubuntu_failed_roles | default([])) | length == 0
+      tags: always
+
+    - name: Report every role that failed
+      ansible.builtin.debug:
+        msg: |-
+          {{ (ubuntu_failed_roles | default([])) | length }} role(s) failed:
+          {% for f in ubuntu_failed_roles | default([]) %}
+            - {{ f.role }} — at task "{{ f.task }}"
+              {{ f.msg }}
+          {% endfor %}
+          Re-run just the failed ones, for example:
+            sudo ansible-playbook playbook.yml --tags {{ (ubuntu_failed_roles | default([])) | map(attribute='role') | join(',') }}
+      when: (ubuntu_failed_roles | default([])) | length > 0
+      tags: always
+
+    - name: Report that a reboot is required
+      ansible.builtin.debug:
+        msg: >-
+          A reboot is required before {{ desktop_systemd_target }} takes effect.
+          Run:  sudo reboot
+          (or set ubuntu_auto_reboot: true in group_vars/all.yml)
+      when:
+        - reboot_required | default(false)
+        - not (ubuntu_auto_reboot | default(false))
+      tags: always
+
+    # Deliberately the very last thing that happens.
+    - name: Reboot into the graphical target
+      ansible.builtin.reboot:
+        msg: "Rebooting to apply {{ desktop_systemd_target }}"
+        reboot_timeout: 300
+      when:
+        - reboot_required | default(false)
+        - ubuntu_auto_reboot | default(false)
+      tags: always
+
+    - name: Fail the run because one or more roles failed
+      ansible.builtin.fail:
+        msg: >-
+          {{ (ubuntu_failed_roles | default([])) | map(attribute='role') | join(', ') }}
+          failed — see the report above.
+      when: (ubuntu_failed_roles | default([])) | length > 0
+      tags: always

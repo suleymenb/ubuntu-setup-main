@@ -1,0 +1,76 @@
+---
+# QEMU/KVM. Package names live in group_vars/all.yml.
+#
+# Split out of the apps role because this is more than installing packages:
+# group membership and a running daemon decide whether it actually works.
+
+- name: Install virtualisation packages
+  ansible.builtin.apt:
+    name: "{{ virt_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# Installing the packages is not enough: without group membership virt-manager
+# sees no hypervisor and every VM action prompts for a password.
+- name: Add the login user to the virtualisation groups
+  ansible.builtin.user:
+    name: "{{ ansible_facts.env.SUDO_USER }}"
+    groups: "{{ virt_user_groups | join(',') }}"
+    append: true
+  when:
+    - (virt_user_groups | default([])) | length > 0
+    - (ansible_facts.env.SUDO_USER | default('')) not in ['', 'root']
+  register: groups_added
+
+- name: Note that the group change needs a new login
+  ansible.builtin.debug:
+    msg: >-
+      {{ ansible_facts.env.SUDO_USER }} was added to
+      {{ virt_user_groups | join(', ') }}. Group membership only applies to new
+      sessions — log out and back in (or reboot) before using virt-manager.
+  when: groups_added is changed
+
+- name: Warn if no real login user could be determined
+  ansible.builtin.debug:
+    msg: >-
+      Could not determine a non-root login user, so nobody was added to
+      {{ virt_user_groups | join(', ') }}. Add yourself by hand:
+      sudo usermod -aG {{ virt_user_groups | join(',') }} $USER
+  when: (ansible_facts.env.SUDO_USER | default('')) in ['', 'root']
+
+# This host may itself be a VM. Without nested virtualisation there is no
+# /dev/kvm, and QEMU falls back to pure emulation — which works, but is slow
+# enough that people assume something is broken.
+- name: Check for hardware virtualisation support
+  ansible.builtin.command: kvm-ok
+  register: kvm_ok
+  changed_when: false
+  failed_when: false
+
+- name: Warn if KVM acceleration is unavailable
+  ansible.builtin.debug:
+    msg: >-
+      KVM acceleration is NOT available — QEMU will fall back to software
+      emulation, which is very slow. If this machine is itself a VM, enable
+      nested virtualisation on the hypervisor.
+      kvm-ok said: {{ (kvm_ok.stdout | default('')) | trim }}
+  when: kvm_ok.rc | default(1) != 0
+
+- name: Confirm KVM acceleration is available
+  ansible.builtin.debug:
+    msg: "KVM acceleration available — {{ (kvm_ok.stdout_lines | default(['?'])) | first }}"
+  when: kvm_ok.rc | default(1) == 0
+
+- name: Ensure libvirtd is enabled and running
+  ansible.builtin.systemd_service:
+    name: libvirtd
+    enabled: true
+    state: started
+  register: libvirtd_state
+  failed_when: false
+
+- name: Note if libvirtd could not be started
+  ansible.builtin.debug:
+    msg: "libvirtd did not start. Check: systemctl status libvirtd"
+  when: libvirtd_state is failed

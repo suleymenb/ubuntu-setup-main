@@ -1,0 +1,122 @@
+---
+# Package names live in group_vars/all.yml.
+# The PPAs were already added by preflight, so apt can see veracrypt by now.
+# QEMU/KVM lives in the virtualisation role.
+
+- name: Install apt packages
+  ansible.builtin.apt:
+    name: "{{ apps_packages }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# --- snaps -------------------------------------------------------------------
+# `creates:` is what makes this idempotent — without it the command would run
+# on every play and always report changed.
+
+- name: Install snap packages
+  ansible.builtin.command:
+    cmd: "snap install {{ item.name }}{{ ' --classic' if (item.classic | default(false)) else '' }}"
+    creates: "/snap/bin/{{ item.name }}"
+  loop: "{{ apps_snaps | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: snap_install
+  failed_when: false
+
+- name: Report snaps that failed to install
+  ansible.builtin.debug:
+    msg: "Could not install snap {{ item.item.name }} — {{ item.stderr | default('unknown error') | trim }}"
+  loop: "{{ snap_install.results | default([]) }}"
+  loop_control:
+    label: "{{ item.item.name | default('?') }}"
+  when: item.rc | default(0) != 0
+
+# --- shodan ------------------------------------------------------------------
+# `shodan init` writes ~/.config/shodan/api_key for the real login user, not
+# root. Skipped entirely when no key is provided — never hardcode it.
+- name: Initialise the Shodan CLI
+  ansible.builtin.command: "shodan init {{ shodan_api_key }}"
+  become: true
+  become_user: "{{ ansible_facts.env.SUDO_USER }}"
+  when:
+    - (shodan_api_key | default('') | length) > 0
+    - (ansible_facts.env.SUDO_USER | default('')) not in ['', 'root']
+  no_log: true
+  changed_when: true
+  failed_when: false
+
+- name: Note that Shodan was not initialised
+  ansible.builtin.debug:
+    msg: >-
+      Shodan CLI installed but not initialised — no API key given. Run it
+      yourself:  shodan init YOUR_KEY   (or pass -e shodan_api_key=...)
+  when: (shodan_api_key | default('') | length) == 0
+
+# --- GitHub release .debs ----------------------------------------------------
+# No apt repository, so the .deb comes straight from the GitHub release. The
+# version is resolved at run time rather than pinned here, so this does not rot.
+#
+# Installed version is compared first: `apt: deb=<url>` would re-download the
+# whole package on every run just to discover nothing changed.
+
+- name: Detect the system architecture
+  ansible.builtin.command: dpkg --print-architecture
+  register: dpkg_arch
+  changed_when: false
+
+- name: Look up the latest GitHub release
+  ansible.builtin.uri:
+    url: "https://api.github.com/repos/{{ item.repo }}/releases/latest"
+    return_content: true
+    headers:
+      Accept: application/vnd.github+json
+  loop: "{{ apps_github_debs | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: gh_release
+  failed_when: false
+  when: (dpkg_arch.stdout | trim) in (item.architectures | default(['amd64']))
+
+- name: Check which of them are already installed
+  ansible.builtin.command: "dpkg-query -W -f=${Version} {{ item.name }}"
+  loop: "{{ apps_github_debs | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: deb_installed
+  changed_when: false
+  failed_when: false
+
+- name: Install or upgrade the GitHub .debs
+  ansible.builtin.apt:
+    deb: "{{ deb_url }}"
+    state: present
+  vars:
+    release: "{{ (gh_release.results | selectattr('item.name', 'equalto', item.name) | first) | default({}) }}"
+    deb_url: >-
+      {{ (release.json.assets | default([]))
+         | map(attribute='browser_download_url')
+         | select('search', item.asset_match)
+         | first | default('') }}
+    latest: "{{ release.json.tag_name | default('') | regex_replace('^v', '') }}"
+    installed: >-
+      {{ (deb_installed.results | selectattr('item.name', 'equalto', item.name) | first).stdout | default('') | trim }}
+  loop: "{{ apps_github_debs | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - (dpkg_arch.stdout | trim) in (item.architectures | default(['amd64']))
+    - deb_url | length > 0
+    - installed != latest
+  register: gh_deb_install
+  failed_when: false
+
+- name: Report GitHub .debs that were skipped
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.name }} skipped — no {{ item.asset_match }} asset for
+      {{ dpkg_arch.stdout | trim }}. Use the AppImage instead.
+  loop: "{{ apps_github_debs | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when: (dpkg_arch.stdout | trim) not in (item.architectures | default(['amd64']))
