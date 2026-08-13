@@ -60,6 +60,10 @@ apps_packages:
 
 # Snap packages. classic: true maps to --classic, which IDEs need because they
 # require access outside the snap sandbox.
+#
+# CLion lives here and NOT in jetbrains_ides below: the snap is the build
+# JetBrains publish themselves and it auto-updates. Listing it in both places
+# installed two separate copies of the same IDE.
 apps_snaps:
   - name: clion
     classic: true
@@ -90,10 +94,16 @@ virt_user_groups:
   - kvm
 
 # --- jetbrains ---------------------------------------------------------------
-# Installed from the JetBrains apt repo (added by preflight, like the PPAs).
-# Trim this list to what you actually use — each IDE is 1-2 GB.
-jetbrains_ides:
-  - clion              # C/C++ — your main one
+# Installed from jetbrains-ppa, an UNOFFICIAL third-party apt repo
+# (https://github.com/JonasGroeger/jetbrains-ppa) — not run by JetBrains, and it
+# can lag behind upstream releases. Prefer a snap in apps_snaps where one exists.
+#
+# CLion is deliberately not listed here — it comes from the snap above. Adding it
+# back would install a second copy alongside it.
+#
+# Empty list = the whole jetbrains role no-ops (repo is never even added).
+# Each IDE is 1-2 GB, so only uncomment what you actually use.
+jetbrains_ides: []
 # - rustrover
 # - intellij-idea-ultimate
 # - pycharm-professional
