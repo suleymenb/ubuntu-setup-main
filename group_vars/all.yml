@@ -49,7 +49,6 @@ apps_packages:
   - dmsetup
   - python3-shodan     # shodan CLI
   - ufw
-  # terminal / shell (eza is in the 24.04+ repos — no custom repo needed)
   - eza
   - colorize
   - guake
