@@ -3,7 +3,9 @@
 Turns a headless Ubuntu server into a machine you can reach over RDP. Installs
 LXDE, boots into the graphical target, and sets up xrdp. Safe to re-run.
 
-Tested on Ubuntu 22.04 and 24.04 — on every push, see [CI](#ci). On arm64,
+Tested on Ubuntu 22.04 and 24.04 — on every push, see [CI](#ci). `eza` is
+only packaged from 24.04 on, so 22.04 skips it (it is in
+`apps_optional_packages`). On arm64,
 Obsidian is installed from its AppImage (there is no arm64 `.deb`).
 
 ## Quick start

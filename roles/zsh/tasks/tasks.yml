@@ -1,5 +1,6 @@
 ---
-# Oh My Zsh and friends. zsh/tmux/eza/colorize are installed via apps_packages;
+# Oh My Zsh and friends. zsh/tmux/colorize come from apps_packages and eza from
+# apps_optional_packages;
 # this role does the per-user config.
 #
 # Everything runs as the login user, never root — otherwise Oh My Zsh lands in
@@ -56,11 +57,21 @@
     - name: Configure .zshrc
       when: not (zsh_rc_stat.results[0].stat.islnk | default(false))
       block:
+        # The eza plugin prints a complaint in every new shell when eza is
+        # missing (it is not packaged before Ubuntu 24.04), so drop it then.
+        - name: Check whether eza is installed
+          ansible.builtin.command: which eza
+          register: zsh_eza
+          changed_when: false
+          failed_when: false
+
         - name: Set the plugins line
           ansible.builtin.lineinfile:
             path: "{{ zsh_home }}/.zshrc"
             regexp: '^plugins='
-            line: "plugins=({{ zsh_plugins | join(' ') }})"
+            line: >-
+              plugins=({{ (zsh_plugins if zsh_eza.rc == 0 else zsh_plugins | reject('equalto', 'eza'))
+                         | join(' ') }})
             create: true
             mode: "0644"
 
@@ -98,7 +109,7 @@
             block: |
               ZSH_COLORIZE_STYLE="colorful"
               ZSH_TMUX_AUTOSTART={{ 'true' if zsh_tmux_autostart | default(true) else 'false' }}
-              alias la="eza -la --color=always --group-directories-first"
+              command -v eza >/dev/null && alias la="eza -la --color=always --group-directories-first"
 
     - name: Point tmux at zsh
       ansible.builtin.lineinfile:

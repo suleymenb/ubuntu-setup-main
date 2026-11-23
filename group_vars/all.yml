@@ -64,13 +64,18 @@ apps_packages:
   - dmsetup
   - python3-shodan     # shodan CLI
   - ufw
-  - eza
   - colorize
   - guake
   - tmux
   - zsh
   - gedit
   - keepass2           # password manager
+
+# Installed when the release has them, skipped with a warning when it does
+# not — instead of failing preflight. eza (modern ls) is only in the Ubuntu
+# repos from 24.04 on.
+apps_optional_packages:
+  - eza
 
 # Snap packages. classic: true maps to --classic, which IDEs need because they
 # require access outside the snap sandbox.

@@ -120,6 +120,14 @@ for p in $(list_or apps_packages "vlc veracrypt"); do
   check_pkg "$p"
 done
 
+for p in $(list_or apps_optional_packages ""); do
+  if dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed"; then
+    ok "$p" "$(dpkg-query -W -f='${Version}' "$p" 2>/dev/null)"
+  else
+    warn "$p" "optional — not available on this release"
+  fi
+done
+
 # snaps, read from the same group_vars list
 if (( USE_VARS )); then
   while IFS= read -r sname; do

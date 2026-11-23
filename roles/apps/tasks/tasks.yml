@@ -5,7 +5,7 @@
 
 - name: Install apt packages
   ansible.builtin.apt:
-    name: "{{ apps_packages }}"
+    name: "{{ apps_packages + (apps_optional_available | default([])) }}"
     state: present
     update_cache: true
     cache_valid_time: 3600

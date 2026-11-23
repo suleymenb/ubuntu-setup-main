@@ -117,6 +117,26 @@
       Nothing has been installed. Fix the names in group_vars/all.yml.
   when: pkg_check.results | selectattr('rc', 'ne', 0) | list | length > 0
 
+- name: Check which optional packages this release has
+  ansible.builtin.command: "apt-cache show {{ item }}"
+  loop: "{{ apps_optional_packages | default([]) }}"
+  register: optional_pkg_check
+  changed_when: false
+  failed_when: false
+
+- name: Remember the optional packages that can be installed
+  ansible.builtin.set_fact:
+    apps_optional_available: >-
+      {{ optional_pkg_check.results | default([]) | selectattr('rc', 'eq', 0)
+         | map(attribute='item') | list }}
+
+- name: Warn about optional packages this release does not have
+  ansible.builtin.debug:
+    msg: >-
+      Not available on {{ ansible_facts.distribution }} {{ ansible_facts.distribution_version }},
+      skipped: {{ optional_pkg_check.results | selectattr('rc', 'ne', 0) | map(attribute='item') | join(', ') }}
+  when: optional_pkg_check.results | default([]) | selectattr('rc', 'ne', 0) | list | length > 0
+
 # Snaps come from a different store than apt, so apt-cache cannot vouch for
 # them. Check snapd is usable and that each name actually exists, otherwise a
 # typo only surfaces halfway through the apps role.
