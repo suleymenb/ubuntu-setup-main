@@ -90,6 +90,7 @@
   loop_control:
     label: "{{ item.item }}"
   when: "'ABSENT' in (item.stdout | default(''))"
+  changed_when: true          # only runs for PPAs that are missing
   register: ppa_added
 
 - name: Update the apt cache after adding PPAs
@@ -192,6 +193,42 @@
     - (ansible_facts.env.SUDO_USER | default('')) in ['', 'root']
       or not preflight_authorized_keys.stat.exists
       or preflight_authorized_keys.stat.size == 0
+
+# --- profile and combinations ------------------------------------------------
+- name: Validate the profile
+  ansible.builtin.assert:
+    that: setup_profile in ['workstation', 'server', 'analysis-vm']
+    fail_msg: >-
+      setup_profile is "{{ setup_profile }}" — use workstation, server or
+      analysis-vm.
+    quiet: true
+
+- name: Refuse fail2ban without logs
+  ansible.builtin.fail:
+    msg: |
+      fail2ban_enabled and hardening_disable_logging are both on. fail2ban
+      works by reading the logs that hardening switches off, so it would
+      silently never ban anything. Turn one of them off.
+  when:
+    - fail2ban_enabled | bool
+    - hardening_disable_logging | bool
+
+- name: Check that your RDP certificate and key exist
+  ansible.builtin.stat:
+    path: "{{ item }}"
+  loop: "{{ [xrdp_tls_cert, xrdp_tls_key | default('')] | select | list }}"
+  register: preflight_tls_files
+  when: (xrdp_tls_cert | default('')) | length > 0
+
+- name: Report a missing RDP certificate or key
+  ansible.builtin.fail:
+    msg: |
+      xrdp_tls_cert / xrdp_tls_key must both point to files on this server.
+      Not found: {{ preflight_tls_files.results | rejectattr('stat.exists') | map(attribute='item') | join(', ') }}
+  when:
+    - (xrdp_tls_cert | default('')) | length > 0
+    - (xrdp_tls_key | default('')) | length == 0
+      or preflight_tls_files.results | rejectattr('stat.exists') | list | length > 0
 
 - name: Preflight passed
   ansible.builtin.debug:

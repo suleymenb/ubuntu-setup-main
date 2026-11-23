@@ -3,6 +3,21 @@
 # The preflight role validates these before anything is installed, and
 # verify.sh reads the same file, so they cannot drift apart.
 
+# --- profile -----------------------------------------------------------------
+# What kind of machine this is. It sets the defaults further down (look for
+# setup_profile); each one can still be overridden on its own.
+#
+#   workstation   your own box: logging off (anti-forensics), no fail2ban,
+#                 automatic security updates
+#   server        reachable from the internet: logging on, fail2ban on SSH and
+#                 RDP, automatic security updates
+#   analysis-vm   for studying samples: logging ON so you keep the trail,
+#                 no fail2ban, NO automatic updates (the VM must not change
+#                 underneath an analysis — take snapshots, update by hand)
+#
+# bootstrap.sh asks for this and saves it to local.yml.
+setup_profile: workstation
+
 # --- preflight ---------------------------------------------------------------
 preflight_min_free_gb: 4
 preflight_hosts:
@@ -74,6 +89,9 @@ apps_github_debs:
     repo: obsidianmd/obsidian-releases
     asset_match: 'amd64\.deb'
     architectures: [amd64]
+    # No .deb for other architectures; use the AppImage there.
+    appimage_match:
+      arm64: 'arm64\.AppImage$'
 
 # --- virtualisation ----------------------------------------------------------
 # Own role and own tag: this is a different concern from installing apps, and
@@ -126,6 +144,8 @@ zsh_plugins:
 # Set zsh as the login shell for the login user. On by default — set to false
 # to keep your current shell.
 zsh_make_default_shell: true
+# Start tmux automatically in every interactive zsh (local terminals, SSH).
+zsh_tmux_autostart: true
 
 # --- remote access -----------------------------------------------------------
 # Who may reach SSH and RDP, and how SSH logins work. bootstrap.sh asks these
@@ -148,14 +168,48 @@ ssh_key_only: false
 # Block SSH logins as root (with or without a key).
 ssh_disable_root_login: false
 
+# --- automatic updates -------------------------------------------------------
+# unattended-upgrades installs security updates daily. Off on analysis-vm.
+updates_enabled: "{{ setup_profile != 'analysis-vm' }}"
+# Reboot by itself when an update needs it (kernel, libc). Off by default: a
+# surprise reboot drops your RDP session. Without it, check for
+# /var/run/reboot-required now and then.
+updates_auto_reboot: false
+updates_reboot_time: "04:00"
+
+# --- fail2ban ----------------------------------------------------------------
+# Bans an address after repeated failed SSH or RDP logins. On by default only
+# for the server profile. Needs logging, so it cannot be combined with
+# hardening_disable_logging. Addresses in access_allowed_from are never banned.
+fail2ban_enabled: "{{ setup_profile == 'server' }}"
+fail2ban_maxretry: 5
+fail2ban_findtime: 10m
+fail2ban_bantime: 1h
+
+# --- dotfiles ----------------------------------------------------------------
+# Your own config files from a git repo, cloned to ~/.dotfiles and linked into
+# your home. Empty = skipped. Use an https URL for a public repo; a private one
+# needs an SSH key on this server that GitHub accepts.
+dotfiles_repo: ""
+dotfiles_version: HEAD
+dotfiles_dest: .dotfiles
+# Home-relative link -> file in the repo. Existing files are moved aside to
+# <name>.before-dotfiles once, never deleted. Example:
+#   dotfiles_links:
+#     .tmux.conf: tmux/tmux.conf
+#     .gitconfig: git/gitconfig
+dotfiles_links: {}
+# Or let the repo install itself, run from inside the clone (only after a
+# change), e.g. "./install.sh".
+dotfiles_install_command: ""
+
 # --- hardening ---------------------------------------------------------------
-# Privacy / anti-forensics config from the old script. All opt-out.
-#
-# NOTE for malware study: disabling logs also means you lose the trail when a
-# sample misbehaves. Consider leaving logs ON inside your analysis VM and only
-# hardening the host. Flip any of these to false to keep that subsystem.
+# Privacy / anti-forensics config from the old script.
 hardening_disable_sleep: true       # mask sleep/suspend/hibernate targets
-hardening_disable_logging: true     # journald, rsyslog, auditd off + truncate logs
+# journald, rsyslog, auditd off + truncate logs. Only on the workstation
+# profile: an analysis VM keeps the trail of what a sample did, and a server
+# needs logs for fail2ban. Setting it to false later turns logging back on.
+hardening_disable_logging: "{{ setup_profile == 'workstation' }}"
 hardening_firewall: true            # ufw: deny incoming, allow outgoing
 
 # --- xrdp --------------------------------------------------------------------
@@ -165,6 +219,13 @@ xrdp_port: 3389
 xrdp_session_command: "startlxde"
 xrdp_add_to_ssl_cert_group: true
 xrdp_configure_firewall: true
+# Your own TLS certificate for RDP instead of Ubuntu's self-signed one (which
+# makes every client warn). Paths ON THE SERVER, e.g. from certbot:
+#   xrdp_tls_cert: /etc/letsencrypt/live/rdp.example.com/fullchain.pem
+#   xrdp_tls_key:  /etc/letsencrypt/live/rdp.example.com/privkey.pem
+# Empty = the default certificate. Re-run --tags xrdp after renewing.
+xrdp_tls_cert: ""
+xrdp_tls_key: ""
 
 # --- reboot ------------------------------------------------------------------
 ubuntu_auto_reboot: false

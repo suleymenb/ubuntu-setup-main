@@ -1,0 +1,25 @@
+---
+# Thin wrapper. The real work lives in tasks.yml.
+#
+# Wrapping the role in block/rescue means a failure here is recorded and the
+# play continues with the next role, instead of aborting everything after it.
+- name: Role fail2ban
+  block:
+    - name: Run the fail2ban tasks
+      ansible.builtin.include_tasks: tasks.yml
+
+  rescue:
+    - name: Record that the fail2ban role failed
+      ansible.builtin.set_fact:
+        ubuntu_failed_roles: >-
+          {{ (ubuntu_failed_roles | default([])) + [{
+               'role': 'fail2ban',
+               'task': ansible_failed_task.name | default('unknown task'),
+               'msg': (ansible_failed_result.msg | default('no message')) | string | truncate(200)
+             }] }}
+
+    - name: Warn that fail2ban failed but the run continues
+      ansible.builtin.debug:
+        msg: >-
+          Role 'fail2ban' FAILED at "{{ ansible_failed_task.name | default('unknown task') }}".
+          Continuing with the remaining roles; full report at the end.

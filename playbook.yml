@@ -1,3 +1,4 @@
+---
 - name: Ubuntu setup
   hosts: ubuntu
   gather_facts: true
@@ -22,12 +23,20 @@
       tags: [virtualisation, virt]
     - role: zsh
       tags: [zsh, terminal]
+    # After zsh: once a file is linked from your repo, zsh stops editing it.
+    - role: dotfiles
+      tags: [dotfiles, terminal]
     - role: xrdp
       tags: [xrdp]
     # Firewall rules for SSH and RDP plus the SSH login policy. After xrdp
     # (RDP port), before hardening (which switches the firewall on).
     - role: access
       tags: [access, ssh, xrdp]
+    - role: updates
+      tags: [updates]
+    # After access: never bans the addresses that are allowed in.
+    - role: fail2ban
+      tags: [fail2ban, access]
     # Last: it changes firewall policy and disables logging/sleep, so let
     # everything else install and settle first.
     - role: hardening

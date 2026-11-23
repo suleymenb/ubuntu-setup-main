@@ -44,28 +44,69 @@
         - { name: zsh-syntax-highlighting, repo: "https://github.com/zsh-users/zsh-syntax-highlighting" }
       failed_when: false
 
-    - name: Set the plugins line
-      ansible.builtin.lineinfile:
-        path: "{{ zsh_home }}/.zshrc"
-        regexp: '^plugins='
-        line: "plugins=({{ zsh_plugins | join(' ') }})"
-        create: true
+    # A .zshrc or .tmux.conf that is a symlink comes from your dotfiles repo
+    # (dotfiles role). Editing it here would write into that repo, so those
+    # are left alone — your dotfiles are in charge of them.
+    - name: Check whether .zshrc and .tmux.conf come from your dotfiles
+      ansible.builtin.stat:
+        path: "{{ zsh_home }}/{{ item }}"
+      loop: [.zshrc, .tmux.conf]
+      register: zsh_rc_stat
 
-    - name: Add colorize + tmux settings and the eza alias
-      ansible.builtin.blockinfile:
-        path: "{{ zsh_home }}/.zshrc"
-        marker: "# {mark} ANSIBLE_ZSH"
-        create: true
-        block: |
-          ZSH_COLORIZE_STYLE="colorful"
-          ZSH_TMUX_AUTOSTART=true
-          alias la="eza -la --color=always --group-directories-first"
+    - name: Configure .zshrc
+      when: not (zsh_rc_stat.results[0].stat.islnk | default(false))
+      block:
+        - name: Set the plugins line
+          ansible.builtin.lineinfile:
+            path: "{{ zsh_home }}/.zshrc"
+            regexp: '^plugins='
+            line: "plugins=({{ zsh_plugins | join(' ') }})"
+            create: true
+            mode: "0644"
+
+        # Earlier versions put the block at the end of .zshrc. blockinfile
+        # updates a block where it is and never moves it, so take a
+        # misplaced one out first and let the next task re-add it in place.
+        - name: Read .zshrc
+          ansible.builtin.slurp:
+            path: "{{ zsh_home }}/.zshrc"
+          register: zsh_rc_content
+          failed_when: false
+
+        - name: Remove the settings block if it sits after oh-my-zsh.sh
+          ansible.builtin.blockinfile:
+            path: "{{ zsh_home }}/.zshrc"
+            marker: "# {mark} ANSIBLE_ZSH"
+            state: absent
+          vars:
+            zsh_rc_text: "{{ (zsh_rc_content.content | default('')) | b64decode }}"
+          when:
+            - "'# BEGIN ANSIBLE_ZSH' in zsh_rc_text"
+            - "'source $ZSH/oh-my-zsh.sh' in zsh_rc_text"
+            - zsh_rc_text.find('# BEGIN ANSIBLE_ZSH') > zsh_rc_text.find('source $ZSH/oh-my-zsh.sh')
+
+        # The colorize and tmux plugins read these while Oh My Zsh loads, so
+        # they must come BEFORE "source $ZSH/oh-my-zsh.sh". At the end of the
+        # file, where blockinfile puts things by default, they did nothing.
+        - name: Add colorize + tmux settings and the eza alias
+          ansible.builtin.blockinfile:
+            path: "{{ zsh_home }}/.zshrc"
+            marker: "# {mark} ANSIBLE_ZSH"
+            insertbefore: '^source \$ZSH/oh-my-zsh\.sh'
+            create: true
+            mode: "0644"
+            block: |
+              ZSH_COLORIZE_STYLE="colorful"
+              ZSH_TMUX_AUTOSTART={{ 'true' if zsh_tmux_autostart | default(true) else 'false' }}
+              alias la="eza -la --color=always --group-directories-first"
 
     - name: Point tmux at zsh
       ansible.builtin.lineinfile:
         path: "{{ zsh_home }}/.tmux.conf"
         line: "set-option -g default-shell /bin/zsh"
         create: true
+        mode: "0644"
+      when: not (zsh_rc_stat.results[1].stat.islnk | default(false))
 
 # chsh needs root, so it sits outside the become_user block.
 - name: Make zsh the default shell

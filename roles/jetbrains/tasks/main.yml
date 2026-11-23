@@ -1,6 +1,6 @@
 ---
 # Thin wrapper. The real work lives in tasks.yml.
-- name: jetbrains
+- name: Role jetbrains
   block:
     - name: Run the jetbrains tasks
       ansible.builtin.include_tasks: tasks.yml

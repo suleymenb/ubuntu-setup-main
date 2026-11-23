@@ -1,0 +1,11 @@
+---
+# Loaded last by tests/scenarios.sh: skips the big package installs, which the
+# full run in CI covers, so the container tests stay fast.
+desktop_packages: []
+xrdp_packages: []
+apps_packages: []
+virt_packages: []
+apps_snaps: []
+apps_ppas: []
+preflight_min_free_gb: 1
+hardening_disable_sleep: false

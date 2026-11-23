@@ -1,0 +1,20 @@
+---
+# The roles that decide who can get in, against a real ufw and sshd. Package
+# installs (desktop, apps, ...) are left to the full run in CI. Failed roles
+# are re-raised at the end, because each role's rescue would otherwise hide
+# them from the test.
+- name: Access, updates, fail2ban and hardening under test
+  hosts: ubuntu
+  gather_facts: true
+  become: true
+  roles:
+    - role: preflight
+    - role: access
+    - role: updates
+    - role: fail2ban
+    - role: hardening
+  post_tasks:
+    - name: Fail the test if a role failed
+      ansible.builtin.fail:
+        msg: "{{ ubuntu_failed_roles | to_nice_yaml }}"
+      when: (ubuntu_failed_roles | default([])) | length > 0

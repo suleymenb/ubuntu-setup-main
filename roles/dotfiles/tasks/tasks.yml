@@ -1,0 +1,88 @@
+---
+# Your own dotfiles from a git repo: cloned into the login user's home and
+# linked into place. Does nothing while dotfiles_repo is empty.
+#
+# Runs after the zsh role. Once ~/.zshrc or ~/.tmux.conf is a link into your
+# repo, the zsh role stops editing it, so your file is never rewritten.
+
+- name: Identify the login user
+  ansible.builtin.set_fact:
+    dotfiles_user: "{{ ansible_facts.env.SUDO_USER | default('') }}"
+
+- name: Note that dotfiles are not configured
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'No dotfiles_repo set — skipped.' if (dotfiles_repo | default('')) | length == 0
+         else 'No SUDO_USER — dotfiles skipped. Run via sudo as your normal user.' }}
+  when: (dotfiles_repo | default('')) | length == 0 or dotfiles_user in ['', 'root']
+
+- name: Install the dotfiles
+  when:
+    - (dotfiles_repo | default('')) | length > 0
+    - dotfiles_user not in ['', 'root']
+  become: true
+  become_user: "{{ dotfiles_user }}"
+  vars:
+    dotfiles_home: "/home/{{ dotfiles_user }}"
+    dotfiles_path: "/home/{{ dotfiles_user }}/{{ dotfiles_dest }}"
+  block:
+    # update: true keeps it current on every run; with local changes in the
+    # clone git refuses, and the role is reported as failed rather than
+    # overwriting your work.
+    - name: Clone or update the dotfiles repo
+      ansible.builtin.git:
+        repo: "{{ dotfiles_repo }}"
+        dest: "{{ dotfiles_path }}"
+        version: "{{ dotfiles_version }}"
+        update: true
+      register: dotfiles_git
+
+    - name: Check what is in place at each link target
+      ansible.builtin.stat:
+        path: "{{ dotfiles_home }}/{{ item.key }}"
+      loop: "{{ dotfiles_links | dict2items }}"
+      loop_control:
+        label: "~/{{ item.key }}"
+      register: dotfiles_targets
+
+    # A real file is moved aside once, never deleted.
+    - name: Move existing files aside before linking
+      ansible.builtin.command:
+        cmd: "mv {{ item.stat.path | quote }} {{ (item.stat.path ~ '.before-dotfiles') | quote }}"
+        creates: "{{ item.stat.path }}.before-dotfiles"
+      loop: "{{ dotfiles_targets.results }}"
+      loop_control:
+        label: "~/{{ item.item.key }}"
+      when:
+        - item.stat.exists
+        - not item.stat.islnk
+
+    - name: Make sure parent directories exist
+      ansible.builtin.file:
+        path: "{{ (dotfiles_home ~ '/' ~ item.key) | dirname }}"
+        state: directory
+        mode: "0755"
+      loop: "{{ dotfiles_links | dict2items }}"
+      loop_control:
+        label: "~/{{ item.key }}"
+
+    - name: Link the dotfiles into place
+      ansible.builtin.file:
+        src: "{{ dotfiles_path }}/{{ item.value }}"
+        dest: "{{ dotfiles_home }}/{{ item.key }}"
+        state: link
+        force: true
+      loop: "{{ dotfiles_links | dict2items }}"
+      loop_control:
+        label: "~/{{ item.key }} -> {{ dotfiles_dest }}/{{ item.value }}"
+
+    # For repos that come with their own installer instead of (or as well
+    # as) a list of links. Only runs when the repo was cloned or changed.
+    - name: Run the repo's install command
+      ansible.builtin.command:
+        cmd: "{{ dotfiles_install_command }}"
+        chdir: "{{ dotfiles_path }}"
+      when:
+        - (dotfiles_install_command | default('')) | length > 0
+        - dotfiles_git is changed
+      changed_when: true

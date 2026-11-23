@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # bootstrap.sh
-# 1) Asks who may reach SSH/RDP and how SSH logs in (saved to local.yml)
+# 1) Asks the machine profile, who may reach SSH/RDP and how SSH logs in
+#    (saved to local.yml)
 # 2) Installs Ansible
 # 3) Installs the required collections
 # 4) Runs the playbook
@@ -9,6 +10,8 @@
 # Options:
 #   --reconfigure   ask the remote-access questions again
 #   --no-prompt     never ask; use local.yml if present, else the defaults
+#
+# For tests: UBUNTU_SETUP_STOP_AFTER=questions|ansible stops after that step.
 
 set -euo pipefail
 
@@ -18,7 +21,7 @@ for arg in "$@"; do
   case "$arg" in
     --reconfigure) RECONFIGURE=1 ;;
     --no-prompt)   NO_PROMPT=1 ;;
-    -h|--help)     sed -n '2,11p' "$0"; exit 0 ;;
+    -h|--help)     sed -n '2,14p' "$0"; exit 0 ;;
     *) printf "Unknown option: %s (try --help)\n" "$arg" >&2; exit 2 ;;
   esac
 done
@@ -124,9 +127,28 @@ EOF
 }
 
 configure_access() {
-  local choice entry default_choice=2 key_only=false no_root=false
+  local choice entry default_choice=2 key_only=false no_root=false profile
   local keys="$HOME/.ssh/authorized_keys"
   local -a sources=()
+
+  log "What kind of machine is this?"
+  cat <<EOF
+    1) workstation   your own box: logging off, automatic security updates
+    2) server        reachable from the internet: logging on, fail2ban
+                     against password guessing, automatic security updates
+    3) analysis-vm   for studying samples: logging ON (keeps the trail),
+                     no automatic updates (snapshot and update by hand)
+EOF
+  while true; do
+    read -r -p "    Choice [1]: " choice </dev/tty
+    case "${choice:-1}" in
+      1) profile=workstation ;;
+      2) profile=server ;;
+      3) profile=analysis-vm ;;
+      *) echo "    Pick 1, 2 or 3."; continue ;;
+    esac
+    break
+  done
 
   log "Remote access — who may connect to SSH and RDP?"
   if [[ -n "$CLIENT_IP" ]]; then
@@ -211,6 +233,7 @@ EOF
   {
     echo "# Written by bootstrap.sh — your answers, NOT committed (see .gitignore)."
     echo "# Change them with:  ./bootstrap/bootstrap.sh --reconfigure"
+    echo "setup_profile: $profile"
     if (( ${#sources[@]} == 0 )); then
       echo "access_allowed_from: []"
     else
@@ -229,7 +252,7 @@ CAN_ASK=0
 [[ -t 0 && "$NO_PROMPT" -eq 0 ]] && CAN_ASK=1
 
 if [[ -f "$LOCAL_VARS" && "$RECONFIGURE" -eq 0 ]]; then
-  log "Using your saved remote-access settings (change with --reconfigure):"
+  log "Using your saved settings (change with --reconfigure):"
   grep -v '^#' "$LOCAL_VARS" | sed 's/^/    /'
   # Your IP may have changed since you answered.
   SAVED=()
@@ -246,7 +269,12 @@ elif (( CAN_ASK )); then
 elif [[ -f "$LOCAL_VARS" ]]; then
   log "Cannot ask here — keeping your saved settings in local.yml"
 else
-  log "No local.yml and no prompts — using group_vars defaults (SSH and RDP open to anyone, passwords on)"
+  log "No local.yml and no prompts — using group_vars defaults (workstation profile, SSH and RDP open to anyone, passwords on)"
+fi
+
+if [[ "${UBUNTU_SETUP_STOP_AFTER:-}" == "questions" ]]; then
+  log "Stopping after the questions (UBUNTU_SETUP_STOP_AFTER)"
+  exit 0
 fi
 
 # --- 3) Prime sudo -----------------------------------------------------------
@@ -261,15 +289,58 @@ SUDO_KEEPALIVE_PID=$!
 trap 'kill "$SUDO_KEEPALIVE_PID" 2>/dev/null || true' EXIT
 
 # --- 4) Ansible --------------------------------------------------------------
-log "Checking Ansible"
-if ! command -v ansible-playbook >/dev/null 2>&1; then
-  log "Installing Ansible"
-  sudo apt-get update
-  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ansible
-fi
+# community.general 10/11 (requirements.yml) needs ansible-core 2.16 or newer.
+# Ubuntu 24.04's apt has 2.16; 22.04's apt has Ansible 2.10, which is far too
+# old, so there we add the official Ansible PPA.
+NEED_CORE="2.16"
 
+# Prints nothing (and never fails) when Ansible is missing — with pipefail and
+# set -e a failing `ansible --version` would otherwise end the script silently.
+ansible_core_version() {
+  { ansible --version 2>/dev/null || true; } | sed -n 's/.*core \([0-9][0-9.]*\).*/\1/p' | head -n1
+}
+version_ge() { [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -n1)" == "$2" ]]; }
+
+log "Checking Ansible"
+CORE="$(ansible_core_version)"
+if [[ -z "$CORE" ]] || ! version_ge "$CORE" "$NEED_CORE"; then
+  log "Installing Ansible (need ansible-core >= $NEED_CORE, found ${CORE:-none})"
+  sudo apt-get update
+  # Decide on the PPA BEFORE installing anything: putting the PPA's
+  # ansible-core on top of 22.04's own Ansible 2.10 makes dpkg fail on
+  # overlapping files.
+  CANDIDATE="$(apt-cache policy ansible-core 2>/dev/null | awk '/Candidate:/ {print $2}')"
+  CANDIDATE="${CANDIDATE%%-*}"
+  if [[ -z "$CANDIDATE" || "$CANDIDATE" == "(none)" ]] || ! version_ge "$CANDIDATE" "$NEED_CORE"; then
+    log "Ubuntu's Ansible is too old (${CANDIDATE:-none}) — using ppa:ansible/ansible"
+    if dpkg-query -W -f='${Status}' ansible 2>/dev/null | grep -q "install ok installed"; then
+      log "Removing the old Ansible package first"
+      sudo DEBIAN_FRONTEND=noninteractive apt-get remove -y ansible
+    fi
+    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y software-properties-common
+    sudo add-apt-repository -y ppa:ansible/ansible
+    sudo apt-get update
+  fi
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ansible-core
+  CORE="$(ansible_core_version)"
+  if [[ -z "$CORE" ]] || ! version_ge "$CORE" "$NEED_CORE"; then
+    log "ERROR: still no ansible-core >= $NEED_CORE (found ${CORE:-none})."
+    exit 1
+  fi
+fi
+log "ansible-core $CORE"
+
+# Into the repo, not ~/.ansible: the playbook runs under sudo, where ~ is
+# /root, so collections installed for your user were silently ignored and
+# Ansible fell back to whatever old version the apt package bundles.
+# ansible.cfg points collections_path here.
 log "Installing required Ansible collections"
-ansible-galaxy collection install -r "$REPO_ROOT/requirements.yml"
+ansible-galaxy collection install -r "$REPO_ROOT/requirements.yml" -p "$REPO_ROOT/collections"
+
+if [[ "${UBUNTU_SETUP_STOP_AFTER:-}" == "ansible" ]]; then
+  log "Stopping after installing Ansible (UBUNTU_SETUP_STOP_AFTER)"
+  exit 0
+fi
 
 # --- 5) Run playbook ---------------------------------------------------------
 # Run ansible-playbook itself under sudo, deliberately.

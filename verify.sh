@@ -24,11 +24,21 @@ for path in sys.argv[1:3]:
     except Exception:
         pass
 value = data.get(sys.argv[3], [])
+# Profile-driven settings are Jinja expressions such as
+# "{{ setup_profile == 'server' }}". Render them against the same data the
+# playbook sees, so this script agrees with what Ansible did.
+if isinstance(value, str) and "{{" in value:
+    try:
+        import jinja2
+        value = jinja2.Environment().from_string(value).render(**data).strip()
+    except Exception:
+        pass
 if not isinstance(value, list):
     value = [value]
 for entry in value or []:
     # YAML booleans come back as True/False; print them as the file spells them.
-    print(str(entry).lower() if isinstance(entry, bool) else entry)
+    text = str(entry)
+    print(text.lower() if text in ("True", "False") else text)
 PY
 }
 
@@ -76,6 +86,7 @@ printf "%subuntu-setup verification%s  —  %s\n" "$B" "$N" "$(date '+%Y-%m-%d %
 section "System"
 
 if [[ -f /etc/os-release ]]; then
+  # shellcheck source=/dev/null
   . /etc/os-release
   ok "Distribution" "$PRETTY_NAME"
 else
@@ -160,15 +171,62 @@ if systemctl is-enabled sleep.target 2>/dev/null | grep -q masked; then
 else
   warn "sleep masked" "still enabled"
 fi
-if systemctl is-active systemd-journald >/dev/null 2>&1; then
-  warn "journald disabled" "still running"
+profile=$(list_or setup_profile "workstation" | head -n1)
+if [[ "$(list_or hardening_disable_logging true | head -n1)" == "true" ]]; then
+  if systemctl is-active systemd-journald >/dev/null 2>&1; then
+    warn "journald disabled" "still running ($profile profile)"
+  else
+    ok "journald disabled" "$profile profile"
+  fi
 else
-  ok "journald disabled"
+  if systemctl is-active systemd-journald >/dev/null 2>&1; then
+    ok "logging on" "$profile profile"
+  else
+    bad "logging on" "journald not running — re-run --tags hardening"
+  fi
 fi
 if sudo -n ufw status 2>/dev/null | grep -q "Status: active"; then
   ok "ufw active"
 else
   warn "ufw active" "not enabled"
+fi
+
+# --- updates -----------------------------------------------------------------
+section "Updates"
+
+if [[ "$(list_or updates_enabled true | head -n1)" == "true" ]]; then
+  check_pkg unattended-upgrades
+  if grep -q 'Unattended-Upgrade "1"' /etc/apt/apt.conf.d/20auto-upgrades 2>/dev/null; then
+    ok "automatic security updates" "on"
+  else
+    bad "automatic security updates" "off — re-run --tags updates"
+  fi
+else
+  ok "automatic security updates" "off ($profile profile)"
+fi
+if [[ -f /var/run/reboot-required ]]; then
+  warn "reboot required" "an update is waiting for it — sudo reboot"
+fi
+
+# --- fail2ban ----------------------------------------------------------------
+section "fail2ban"
+
+if [[ "$(list_or fail2ban_enabled false | head -n1)" == "true" ]]; then
+  if systemctl is-active fail2ban >/dev/null 2>&1; then
+    ok "fail2ban running"
+  else
+    bad "fail2ban running" "systemctl status fail2ban"
+  fi
+  jails=$(sudo -n fail2ban-client status 2>/dev/null | sed -n 's/.*Jail list:[[:space:]]*//p')
+  if [[ -z "$jails" ]]; then
+    warn "fail2ban jails" "run with sudo to check them"
+  else
+    for j in sshd ubuntu-setup-xrdp; do
+      if grep -qw "$j" <<<"${jails//,/ }"; then ok "jail $j"; else bad "jail $j" "not active"; fi
+    done
+  fi
+else
+  ok "fail2ban" "off ($profile profile)"
 fi
 
 # --- virtualisation ----------------------------------------------------------
@@ -205,7 +263,11 @@ if (( USE_VARS )); then
   while IFS='|' read -r dname darch; do
     [[ -z "$dname" ]] && continue
     if [[ "$(dpkg --print-architecture)" != "$darch" ]]; then
-      warn "$dname" "skipped — no .deb for $(dpkg --print-architecture)"
+      if [[ -x "/opt/$dname/$dname.AppImage" ]]; then
+        ok "$dname" "AppImage $(cat "/opt/$dname/VERSION" 2>/dev/null)"
+      else
+        warn "$dname" "no .deb for $(dpkg --print-architecture), and no AppImage in /opt/$dname"
+      fi
     else
       check_pkg "$dname"
     fi

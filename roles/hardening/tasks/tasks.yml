@@ -12,7 +12,7 @@
     - suspend.target
     - hibernate.target
     - hybrid-sleep.target
-  when: hardening_disable_sleep | default(true)
+  when: hardening_disable_sleep | default(true) | bool
 
 # --- logging -----------------------------------------------------------------
 # journald first: set Storage=none so nothing is written to disk, then stop and
@@ -23,7 +23,8 @@
     regexp: '^#?Storage='
     line: 'Storage=none'
     create: true
-  when: hardening_disable_logging | default(true)
+    mode: "0644"
+  when: hardening_disable_logging | default(true) | bool
   register: journald_conf
 
 - name: Mask the logging services
@@ -37,13 +38,13 @@
     - rsyslog.service
     - auditd.service
   failed_when: false          # not all of these exist on every install
-  when: hardening_disable_logging | default(true)
+  when: hardening_disable_logging | default(true) | bool
 
 - name: Vacuum existing journal entries
   ansible.builtin.command: journalctl --vacuum-time=1s
   changed_when: false
   failed_when: false
-  when: hardening_disable_logging | default(true)
+  when: hardening_disable_logging | default(true) | bool
 
 # Truncate rather than delete: keeps ownership/permissions the services expect
 # if you ever turn logging back on.
@@ -59,7 +60,40 @@
   args:
     executable: /bin/bash
   changed_when: false
-  when: hardening_disable_logging | default(true)
+  when: hardening_disable_logging | default(true) | bool
+
+# Switching to a profile that keeps logs (server, analysis-vm) on a machine
+# where an earlier run turned them off: undo exactly what the tasks above did.
+# Logs that were already truncated are gone; this only restores logging from
+# now on.
+- name: Turn logging back on
+  when: not (hardening_disable_logging | default(true) | bool)
+  block:
+    - name: Set journald storage back to the default
+      ansible.builtin.lineinfile:
+        path: /etc/systemd/journald.conf
+        regexp: '^Storage=none'
+        line: '#Storage=auto'
+      register: journald_restored
+
+    - name: Unmask and start the logging services
+      ansible.builtin.systemd_service:
+        name: "{{ item }}"
+        masked: false
+        enabled: true
+        state: started
+      loop:
+        - systemd-journald.service
+        - rsyslog.service
+        - auditd.service
+      failed_when: false          # not all of these exist on every install
+
+    - name: Restart journald to pick up the storage setting
+      ansible.builtin.systemd_service:
+        name: systemd-journald.service
+        state: restarted
+      when: journald_restored is changed
+      failed_when: false
 
 # --- firewall ----------------------------------------------------------------
 # ufw itself is installed via apps_packages; here we set the policy.
@@ -72,7 +106,7 @@
   loop:
     - { dir: incoming, policy: deny }
     - { dir: outgoing, policy: allow }
-  when: hardening_firewall | default(true)
+  when: hardening_firewall | default(true) | bool
 
 # Last line of defence against locking yourself out of a remote server: if the
 # access role failed or was skipped with --tags, there may be no SSH rule yet.
@@ -81,7 +115,7 @@
   register: hardening_ufw_added
   changed_when: false
   when:
-    - hardening_firewall | default(true)
+    - hardening_firewall | default(true) | bool
     - access_allow_ssh | default(true)
 
 - name: Refuse to enable ufw while SSH is not allowed
@@ -92,11 +126,11 @@
         sudo ansible-playbook playbook.yml --tags access
       or set access_allow_ssh: false if you never use SSH.
   when:
-    - hardening_firewall | default(true)
+    - hardening_firewall | default(true) | bool
     - access_allow_ssh | default(true)
     - not (hardening_ufw_added.stdout is search('(port ' ~ ssh_port ~ ' |allow ' ~ ssh_port ~ '(/tcp)?( |$)|OpenSSH)', multiline=True))
 
 - name: Enable ufw
   community.general.ufw:
     state: enabled
-  when: hardening_firewall | default(true)
+  when: hardening_firewall | default(true) | bool

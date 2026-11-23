@@ -1,0 +1,14 @@
+---
+# Hardening on its own, as with --tags hardening: must refuse to enable ufw
+# when no SSH rule exists.
+- name: Hardening without the access role
+  hosts: ubuntu
+  gather_facts: true
+  become: true
+  roles:
+    - role: hardening
+  post_tasks:
+    - name: Fail the test if a role failed
+      ansible.builtin.fail:
+        msg: "{{ ubuntu_failed_roles | to_nice_yaml }}"
+      when: (ubuntu_failed_roles | default([])) | length > 0

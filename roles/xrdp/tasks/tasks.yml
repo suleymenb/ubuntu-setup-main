@@ -41,6 +41,48 @@
       echo "{{ xrdp_session_command }}" > ~/.xsession
   when: (ansible_facts.env.SUDO_USER | default('')) in ['', 'root']
 
+# --- TLS certificate ---------------------------------------------------------
+# By default xrdp uses Ubuntu's self-signed "snakeoil" certificate, so every
+# client warns about it, and you cannot tell a real warning from that one.
+# With your own certificate the warning goes away and a new one means
+# something. The files are COPIED into /etc/xrdp: xrdp reads them as the
+# unprivileged xrdp user, which cannot get into /etc/letsencrypt/live. Re-run
+# --tags xrdp after renewing.
+- name: Copy your TLS certificate and key for xrdp
+  ansible.builtin.copy:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    remote_src: true
+    owner: root
+    group: ssl-cert
+    mode: "{{ item.mode }}"
+  loop:
+    - { src: "{{ xrdp_tls_cert }}", dest: /etc/xrdp/ubuntu-setup-cert.pem, mode: "0644" }
+    - { src: "{{ xrdp_tls_key }}", dest: /etc/xrdp/ubuntu-setup-key.pem, mode: "0640" }
+  loop_control:
+    label: "{{ item.dest }}"
+  when: (xrdp_tls_cert | default('')) | length > 0
+  notify: Restart xrdp
+
+# Empty values mean "the default" (Ubuntu's snakeoil pair), which is how
+# taking xrdp_tls_cert out again restores the old behaviour.
+- name: Point xrdp at the certificate
+  community.general.ini_file:
+    path: /etc/xrdp/xrdp.ini
+    section: Globals
+    option: "{{ item.option }}"
+    value: "{{ item.value }}"
+    no_extra_spaces: true
+    mode: "0644"
+  loop:
+    - option: certificate
+      value: "{{ '/etc/xrdp/ubuntu-setup-cert.pem' if (xrdp_tls_cert | default('')) | length > 0 else '' }}"
+    - option: key_file
+      value: "{{ '/etc/xrdp/ubuntu-setup-key.pem' if (xrdp_tls_cert | default('')) | length > 0 else '' }}"
+  loop_control:
+    label: "{{ item.option }}={{ item.value }}"
+  notify: Restart xrdp
+
 - name: Enable and start xrdp
   ansible.builtin.systemd_service:
     name: xrdp

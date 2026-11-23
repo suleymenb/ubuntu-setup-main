@@ -1,0 +1,16 @@
+---
+profile: production
+
+exclude_paths:
+  - collections/
+  - .github/
+  - tests/overrides.yml
+
+# Role names follow the README; variables are prefixed by what they configure
+# (access_, ssh_, xrdp_, ...) rather than strictly by role name.
+skip_list:
+  - var-naming[no-role-prefix]
+  # Several tasks deliberately act on "changed" inline: recording that a
+  # reboot is due, writing a version file after a download, reporting a group
+  # change. Turning each into a handler would only move it further away.
+  - no-handler
