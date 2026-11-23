@@ -63,8 +63,8 @@
 
 # --- firewall ----------------------------------------------------------------
 # ufw itself is installed via apps_packages; here we set the policy.
-# Note: xrdp opens 3389 in its own role — that runs after this, so RDP still
-# works despite "deny incoming".
+# The access role (which runs before this one) has already added the SSH and
+# RDP allow rules, so "deny incoming" does not cut them off.
 - name: Set ufw default policies
   community.general.ufw:
     direction: "{{ item.dir }}"
@@ -73,6 +73,28 @@
     - { dir: incoming, policy: deny }
     - { dir: outgoing, policy: allow }
   when: hardening_firewall | default(true)
+
+# Last line of defence against locking yourself out of a remote server: if the
+# access role failed or was skipped with --tags, there may be no SSH rule yet.
+- name: Read the ufw rules before enabling the firewall
+  ansible.builtin.command: ufw show added
+  register: hardening_ufw_added
+  changed_when: false
+  when:
+    - hardening_firewall | default(true)
+    - access_allow_ssh | default(true)
+
+- name: Refuse to enable ufw while SSH is not allowed
+  ansible.builtin.fail:
+    msg: |
+      Not enabling ufw: there is no rule allowing SSH on port {{ ssh_port }}, so
+      "deny incoming" would lock you out. Run the access role first:
+        sudo ansible-playbook playbook.yml --tags access
+      or set access_allow_ssh: false if you never use SSH.
+  when:
+    - hardening_firewall | default(true)
+    - access_allow_ssh | default(true)
+    - not (hardening_ufw_added.stdout is search('(port ' ~ ssh_port ~ ' |allow ' ~ ssh_port ~ '(/tcp)?( |$)|OpenSSH)', multiline=True))
 
 - name: Enable ufw
   community.general.ufw:

@@ -156,6 +156,43 @@
     - snap_check.results is defined
     - snap_check.results | selectattr('rc', 'defined') | selectattr('rc', 'ne', 0) | list | length > 0
 
+# --- remote access -----------------------------------------------------------
+# A typo in an IP here becomes a firewall rule for the wrong address, which is
+# a lockout. Shape check only; ufw rejects anything it cannot parse.
+- name: Validate the allowed source addresses
+  ansible.builtin.assert:
+    that:
+      - item is string
+      - item is match('^([0-9]{1,3}\.){3}[0-9]{1,3}(/[0-9]{1,2})?$') or
+        item is match('^[0-9a-fA-F:]*:[0-9a-fA-F:]*(/[0-9]{1,3})?$')
+    fail_msg: >-
+      "{{ item }}" in access_allowed_from is not an IP address or CIDR range
+      (e.g. 203.0.113.7 or 198.51.100.0/24).
+    quiet: true
+  loop: "{{ access_allowed_from | default([]) }}"
+
+- name: Find the login user's authorized SSH keys
+  ansible.builtin.stat:
+    path: "/home/{{ ansible_facts.env.SUDO_USER | default('') }}/.ssh/authorized_keys"
+  register: preflight_authorized_keys
+  when: ssh_key_only | default(false)
+
+# Turning off passwords with no key in place is the one setting here that
+# locks you out for certain.
+- name: Refuse key-only SSH without an authorized key
+  ansible.builtin.fail:
+    msg: |
+      ssh_key_only is on, but /home/{{ ansible_facts.env.SUDO_USER | default('<user>') }}/.ssh/authorized_keys
+      is missing or empty — turning off passwords now would lock you out.
+      From the machine you connect FROM, run:
+        ssh-copy-id {{ ansible_facts.env.SUDO_USER | default('<user>') }}@<this-server>
+      check that "ssh <user>@<this-server>" logs in without a password, then run again.
+  when:
+    - ssh_key_only | default(false)
+    - (ansible_facts.env.SUDO_USER | default('')) in ['', 'root']
+      or not preflight_authorized_keys.stat.exists
+      or preflight_authorized_keys.stat.size == 0
+
 - name: Preflight passed
   ansible.builtin.debug:
     msg: >-

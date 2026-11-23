@@ -49,20 +49,8 @@
     daemon_reload: true
 
 # --- firewall ----------------------------------------------------------------
-# Only touched when ufw is actually installed and active; an RDP server you
-# cannot reach is not much use.
-
-# Add the allow rule unconditionally, not only when ufw is already active.
-# The hardening role enables ufw with "default deny incoming" AFTER this role
-# runs; if the rule were gated on ufw being active it would not exist yet, and
-# enabling ufw would then lock out RDP. ufw stores an allow rule fine while
-# inactive and applies it on enable.
-- name: Open the RDP port in ufw
-  community.general.ufw:
-    rule: allow
-    port: "{{ xrdp_port }}"
-    proto: tcp
-  when: xrdp_configure_firewall | default(true)
+# The RDP port is opened by the access role, together with SSH, so both follow
+# the same access_allowed_from list. It runs right after this role.
 
 # --- verify ------------------------------------------------------------------
 

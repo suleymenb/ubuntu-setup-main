@@ -8,19 +8,27 @@ set -uo pipefail
 # installs from — so this script can never drift out of sync with it.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 VARS_FILE="$REPO_ROOT/group_vars/all.yml"
+# Your answers from bootstrap.sh, which override group_vars — same as the
+# playbook sees them.
+LOCAL_VARS="$REPO_ROOT/local.yml"
 
 read_list() {
-  python3 - "$VARS_FILE" "$1" <<'PY'
-import sys, yaml
-try:
-    data = yaml.safe_load(open(sys.argv[1])) or {}
-except Exception:
-    sys.exit(0)
-value = data.get(sys.argv[2], [])
+  python3 - "$VARS_FILE" "$LOCAL_VARS" "$1" <<'PY'
+import os, sys, yaml
+data = {}
+for path in sys.argv[1:3]:
+    if not os.path.exists(path):
+        continue
+    try:
+        data.update(yaml.safe_load(open(path)) or {})
+    except Exception:
+        pass
+value = data.get(sys.argv[3], [])
 if not isinstance(value, list):
     value = [value]
 for entry in value or []:
-    print(entry)
+    # YAML booleans come back as True/False; print them as the file spells them.
+    print(str(entry).lower() if isinstance(entry, bool) else entry)
 PY
 }
 
@@ -255,18 +263,61 @@ fi
 # --- firewall ----------------------------------------------------------------
 section "Firewall"
 
+ssh_port=$(list_or ssh_port "22" | head -n1)
+allowed_from=$(list_or access_allowed_from "")
+
+# ufw status needs root; without a cached sudo credential we say so instead of
+# reporting a false failure.
+ufw_status=""
 if command -v ufw >/dev/null 2>&1; then
-  if sudo -n ufw status 2>/dev/null | grep -q "Status: active"; then
-    if sudo -n ufw status 2>/dev/null | grep -q "${xrdp_port}"; then
-      ok "ufw allows ${xrdp_port}"
+  ufw_status=$(sudo -n ufw status 2>/dev/null) || ufw_status="__nosudo__"
+fi
+
+# port_rules PORT -> the ufw status lines that allow PORT/tcp
+port_rules() { grep -E "^${1}(/tcp)?[[:space:]]+ALLOW" <<<"$ufw_status"; }
+
+if ! command -v ufw >/dev/null 2>&1; then
+  ok "ufw not installed" "no rules needed"
+elif [[ "$ufw_status" == "__nosudo__" ]]; then
+  warn "ufw rules" "run with sudo to check them"
+elif ! grep -q "Status: active" <<<"$ufw_status"; then
+  ok "ufw inactive" "no rules needed"
+else
+  for pair in "SSH:$ssh_port" "RDP:$xrdp_port"; do
+    name=${pair%%:*}; port=${pair#*:}
+    rules=$(port_rules "$port")
+    sources=$(awk '{print $3}' <<<"$rules" | sort -u | paste -sd, -)
+    if [[ -z "$rules" ]]; then
+      bad "ufw allows $name ($port)" "nothing allows it — sudo ansible-playbook playbook.yml --tags access"
+    elif [[ -z "$allowed_from" ]]; then
+      ok "ufw allows $name ($port)" "from $sources"
+    elif grep -q "Anywhere" <<<"$rules"; then
+      bad "$name only from allowed IPs" "still open to anywhere — re-run --tags access"
     else
-      bad "ufw allows ${xrdp_port}" "ufw allow ${xrdp_port}/tcp"
+      ok "$name only from allowed IPs" "$sources"
     fi
+  done
+fi
+
+# --- ssh login ---------------------------------------------------------------
+section "SSH login"
+
+policy=/etc/ssh/sshd_config.d/00-ubuntu-setup.conf
+if [[ "$(list_or ssh_key_only false | head -n1)" == "true" ]]; then
+  if grep -qx "PasswordAuthentication no" "$policy" 2>/dev/null; then
+    ok "password login off" "keys only"
   else
-    ok "ufw inactive" "no rule needed"
+    bad "password login off" "$policy missing — re-run --tags access"
   fi
 else
-  ok "ufw not installed" "no rule needed"
+  ok "password login on" "set ssh_key_only to switch to keys"
+fi
+if [[ "$(list_or ssh_disable_root_login false | head -n1)" == "true" ]]; then
+  if grep -qx "PermitRootLogin no" "$policy" 2>/dev/null; then
+    ok "root login blocked"
+  else
+    bad "root login blocked" "$policy missing — re-run --tags access"
+  fi
 fi
 
 # --- summary -----------------------------------------------------------------

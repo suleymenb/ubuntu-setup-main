@@ -1,0 +1,10 @@
+---
+# try-reload-or-restart is a no-op when ssh.service is not running, which is
+# normal on 24.04 (socket activation): the next connection starts a fresh sshd
+# that reads the new config anyway. A plain reload would fail there.
+#
+# Reload, not restart: existing sessions — including the one you may be
+# running this over — stay up.
+- name: Reload ssh
+  ansible.builtin.command: systemctl try-reload-or-restart ssh.service
+  changed_when: true

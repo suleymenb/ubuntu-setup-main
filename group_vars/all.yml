@@ -127,6 +127,27 @@ zsh_plugins:
 # to keep your current shell.
 zsh_make_default_shell: true
 
+# --- remote access -----------------------------------------------------------
+# Who may reach SSH and RDP, and how SSH logins work. bootstrap.sh asks these
+# questions on the first run and saves your answers to local.yml (not
+# committed), which overrides the defaults below.
+#
+# Firewall sources for SSH and RDP. Empty = anyone. Each entry is an IP or a
+# CIDR range, e.g. "203.0.113.7" or "198.51.100.0/24".
+access_allowed_from: []
+
+# Allow SSH through ufw. The hardening role switches on "deny incoming" and
+# refuses to do so while no SSH rule exists, so this keeps you from locking
+# yourself out of a remote server.
+access_allow_ssh: true
+ssh_port: 22
+
+# Turn off SSH password login, keys only. Preflight refuses to apply it while
+# the login user has no ~/.ssh/authorized_keys, so you cannot lock yourself out.
+ssh_key_only: false
+# Block SSH logins as root (with or without a key).
+ssh_disable_root_login: false
+
 # --- hardening ---------------------------------------------------------------
 # Privacy / anti-forensics config from the old script. All opt-out.
 #

@@ -19,6 +19,10 @@ Run it as your **normal user**, not as root — the RDP session is configured fo
 whoever runs it. The script asks for your password once and uses sudo where
 needed.
 
+Before it installs anything it asks three questions — who may connect, whether
+SSH should be key-only, and whether to block root over SSH. See
+[Remote access](#remote-access).
+
 ## What it does
 
 | Role | |
@@ -29,7 +33,8 @@ needed.
 | **jetbrains** | Extra JetBrains IDEs from the unofficial jetbrains-ppa — none by default (CLion comes from the snap) |
 | **virtualisation** | QEMU/KVM, virt-manager, libvirt groups, KVM acceleration check |
 | **zsh** | Oh My Zsh + plugins for the login user, made the default shell (opt-out) |
-| **xrdp** | Installs xrdp, enables and starts it, opens port 3389 in ufw |
+| **xrdp** | Installs xrdp, enables and starts it |
+| **access** | ufw rules for SSH and RDP (optionally only from your IPs), SSH key-only / no-root login |
 | **hardening** | Disable sleep/logging, ufw deny-incoming — runs last, all opt-out |
 
 Beyond the bare commands, the xrdp role also does the two things that decide
@@ -63,6 +68,42 @@ After the reboot, from any RDP client (Microsoft Remote Desktop, Remmina):
 ```
 
 Log in with your normal Linux username and password.
+
+## Remote access
+
+The hardening role switches the firewall to "deny incoming", so this playbook
+decides who can still get in. `bootstrap.sh` asks on the first run:
+
+1. **Who may connect to SSH and RDP** — only the IP you are SSH'd in from
+   (detected automatically), IPs/ranges you type in, or anywhere. If the list
+   would shut out the SSH session you are running it from, it says so and asks
+   again.
+2. **Key-only SSH** — only offered when `~/.ssh/authorized_keys` has a key, and
+   only switched on after you confirm a key login works from a second
+   terminal.
+3. **Block root login over SSH.**
+
+Your answers go to `local.yml` (git-ignored — your IP never ends up in the
+repo). Re-runs reuse them; change them with:
+
+```bash
+./bootstrap/bootstrap.sh --reconfigure
+```
+
+Safety nets, in the playbook itself:
+
+- SSH is always allowed through ufw (`access_allow_ssh: true`), and the
+  hardening role **refuses to enable ufw** if no SSH rule exists.
+- Preflight refuses `ssh_key_only: true` while the login user has no
+  authorized key.
+- New allow rules are added before old ones are removed, and only rules this
+  playbook created (comment `ubuntu-setup …`) are ever removed.
+- The SSH policy is a drop-in (`/etc/ssh/sshd_config.d/00-ubuntu-setup.conf`),
+  checked with `sshd -t` before it is written, and applied with a reload, so
+  your current session stays up.
+
+RDP always uses your Linux password, so on a public server restricting the
+source IPs is what actually protects it.
 
 ## Customising
 
@@ -115,11 +156,16 @@ Via the bootstrap script — **no sudo in front**, it handles that itself:
 Or calling Ansible directly, which *does* need sudo:
 
 ```bash
-sudo ansible-playbook playbook.yml              # everything
-sudo ansible-playbook playbook.yml --tags xrdp  # one role
-sudo ansible-playbook playbook.yml --check      # dry run
-./verify.sh                                     # health check, no sudo
+sudo ansible-playbook playbook.yml -e @local.yml               # everything
+sudo ansible-playbook playbook.yml -e @local.yml --tags access  # one role
+sudo ansible-playbook playbook.yml -e @local.yml --check        # dry run
+./verify.sh                                                      # health check
 ```
+
+Leave out `-e @local.yml` if you never ran `bootstrap.sh` — then the defaults
+in `group_vars/all.yml` apply (SSH and RDP open to anyone, passwords on).
+`verify.sh` reads `local.yml` itself; run it after a `sudo` to also check the
+firewall rules.
 
 The `sudo` there is deliberate. The two obvious alternatives both fail on
 Ubuntu:
@@ -136,7 +182,8 @@ no-op, and sudo sets `SUDO_USER` so the xrdp role still knows which real user
 gets `~/.xsession`.
 
 Tags: `desktop`, `apps`, `jetbrains`, `virtualisation`, `zsh`, `xrdp`,
-`hardening`. Preflight always runs.
+`access` (also `ssh`), `hardening`. Preflight always runs. `--tags xrdp` also
+runs `access`, because that is where the RDP port is opened.
 
 **Secrets — never commit them.** The Shodan API key is not stored in the repo.
 Pass it at run time, or export it, or skip it:
@@ -180,12 +227,23 @@ sudo systemctl restart xrdp
 ```
 
 **Connection refused**
-Check the service and the firewall:
+Check the service and the firewall. If you restricted access, your IP may have
+changed — `curl -s https://ifconfig.me` on your own machine shows the current
+one:
 
 ```bash
 systemctl status xrdp
 sudo ufw status
-sudo ufw allow 3389/tcp
+./bootstrap/bootstrap.sh --reconfigure
+```
+
+**Locked out of SSH**
+Use your provider's web/serial console (or the physical machine), then either
+allow your new IP or turn the restriction off:
+
+```bash
+sudo ufw allow from <your-ip> to any port 22 proto tcp
+sudo rm /etc/ssh/sshd_config.d/00-ubuntu-setup.conf && sudo systemctl reload ssh   # passwords back on
 ```
 
 **`sudo: interactive authentication is required` or `Timed out waiting for become success`**
@@ -232,15 +290,17 @@ sudo systemctl set-default graphical.target
 
 ```
 group_vars/all.yml          every package name — the only file to edit
+local.yml                   your bootstrap answers (git-ignored, overrides the above)
 playbook.yml                role order + final failure report
 bootstrap/bootstrap.sh      first-run setup, guards against nested clones
 verify.sh                   post-run health check
 roles/
   preflight/                validates everything up front (not wrapped)
-  desktop/ apps/ jetbrains/ virtualisation/ zsh/ xrdp/ hardening/
+  desktop/ apps/ jetbrains/ virtualisation/ zsh/ xrdp/ access/ hardening/
     tasks/main.yml          block/rescue wrapper
     tasks/tasks.yml         the actual work
   xrdp/handlers/            restart xrdp only when something changed
+  access/handlers/          reload sshd only when the login policy changed
 ```
 
 ## Notes

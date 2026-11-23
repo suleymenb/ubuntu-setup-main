@@ -1,0 +1,140 @@
+---
+# Who can reach this machine: ufw rules for SSH and RDP, and the SSH login
+# policy. Runs after xrdp and before hardening, which switches ufw on.
+#
+# Settings live in group_vars/all.yml; bootstrap.sh writes your answers to
+# local.yml, which overrides them.
+
+- name: Work out the firewall sources and ports
+  ansible.builtin.set_fact:
+    # 'any' is what the ufw module uses for "from anywhere".
+    access_sources: >-
+      {{ access_allowed_from if (access_allowed_from | default([])) | length > 0
+         else ['any'] }}
+    access_ports: >-
+      {{ ([{'name': 'ssh', 'port': ssh_port | int}] if access_allow_ssh | default(true) else [])
+         + ([{'name': 'rdp', 'port': xrdp_port | int}] if xrdp_configure_firewall | default(true) else []) }}
+
+# --- firewall ----------------------------------------------------------------
+- name: Check whether ufw is installed
+  ansible.builtin.stat:
+    path: /usr/sbin/ufw
+  register: access_ufw_bin
+
+- name: Firewall rules
+  when: access_ufw_bin.stat.exists
+  block:
+    # Rules are added even while ufw is inactive: ufw stores them and applies
+    # them when hardening enables it. New rules go in BEFORE old ones are
+    # removed, so there is never a moment without access.
+    - name: Allow SSH and RDP from the configured sources
+      community.general.ufw:
+        rule: allow
+        src: "{{ item.1 }}"
+        port: "{{ item.0.port | string }}"
+        proto: tcp
+        comment: "ubuntu-setup {{ item.0.name }}"
+      loop: "{{ access_ports | product(access_sources) | list }}"
+      loop_control:
+        label: "{{ item.0.name }} {{ item.0.port }}/tcp from {{ item.1 }}"
+
+    # Restricting access only means something once the "from anywhere" rule
+    # is gone. ufw matches rules without their comment, so this also removes
+    # the unrestricted rule older versions of this playbook added.
+    - name: Remove the allow-from-anywhere rules when access is restricted
+      community.general.ufw:
+        rule: allow
+        port: "{{ item.port | string }}"
+        proto: tcp
+        delete: true
+      loop: "{{ access_ports }}"
+      loop_control:
+        label: "{{ item.name }} {{ item.port }}/tcp from any"
+      when: "'any' not in access_sources"
+
+    - name: Read the rules this playbook added earlier
+      ansible.builtin.command: ufw show added
+      register: access_ufw_added
+      changed_when: false
+
+    # Only rules carrying our own comment are touched, so anything you added
+    # by hand stays.
+    - name: Remove sources that are no longer in the allowed list
+      community.general.ufw:
+        rule: allow
+        src: "{{ item[0] }}"
+        port: "{{ item[1] }}"
+        proto: tcp
+        delete: true
+      # Each match is [source, port, name].
+      loop: >-
+        {{ access_ufw_added.stdout
+           | regex_findall('from ([^ ]+) to any port ([0-9]+) proto tcp comment .ubuntu-setup (ssh|rdp).') }}
+      loop_control:
+        label: "{{ item[2] }} {{ item[1] }}/tcp from {{ item[0] }}"
+      when:
+        - item[0] not in access_sources
+        - (item[1] | int) in (access_ports | map(attribute='port') | list)
+
+- name: Note that ufw is not installed
+  ansible.builtin.debug:
+    msg: >-
+      ufw is not installed, so no firewall rules were written. SSH and RDP
+      are reachable from anywhere.
+  when: not access_ufw_bin.stat.exists
+
+# --- SSH login policy --------------------------------------------------------
+- name: Check whether the OpenSSH server is installed
+  ansible.builtin.stat:
+    path: /usr/sbin/sshd
+  register: access_sshd_bin
+
+# A drop-in rather than editing sshd_config: survives package upgrades, and
+# deleting it restores the defaults. The 00- prefix matters: sshd keeps the
+# FIRST value it reads, and Ubuntu cloud images ship 50-cloud-init.conf with
+# "PasswordAuthentication yes", which would otherwise win.
+- name: SSH login policy
+  when: access_sshd_bin.stat.exists
+  block:
+    # sshd -t refuses to run without it, and on 24.04 it only exists while
+    # an sshd process is running (socket activation).
+    - name: Ensure the sshd privilege separation directory exists
+      ansible.builtin.file:
+        path: /run/sshd
+        state: directory
+        mode: "0755"
+
+    - name: Write the SSH login policy
+      ansible.builtin.copy:
+        dest: /etc/ssh/sshd_config.d/00-ubuntu-setup.conf
+        owner: root
+        group: root
+        mode: "0644"
+        validate: /usr/sbin/sshd -t -f %s
+        content: |
+          # Managed by ubuntu-setup (roles/access). Change ssh_key_only and
+          # ssh_disable_root_login in local.yml or group_vars/all.yml instead.
+          {% if ssh_key_only | default(false) %}
+          PasswordAuthentication no
+          KbdInteractiveAuthentication no
+          {% endif %}
+          {% if ssh_disable_root_login | default(false) %}
+          PermitRootLogin no
+          {% endif %}
+      when: ssh_key_only | default(false) or ssh_disable_root_login | default(false)
+      notify: Reload ssh
+
+    - name: Remove the SSH login policy when nothing is restricted
+      ansible.builtin.file:
+        path: /etc/ssh/sshd_config.d/00-ubuntu-setup.conf
+        state: absent
+      when: not (ssh_key_only | default(false) or ssh_disable_root_login | default(false))
+      notify: Reload ssh
+
+- name: Show who can reach this machine
+  ansible.builtin.debug:
+    msg: >-
+      SSH ({{ ssh_port }}) and RDP ({{ xrdp_port }}) allowed from:
+      {{ 'anywhere' if 'any' in access_sources else access_sources | join(', ') }}.
+      SSH password login: {{ 'off (keys only)' if ssh_key_only | default(false) else 'on' }}.
+      SSH root login: {{ 'blocked' if ssh_disable_root_login | default(false) else 'Ubuntu default' }}.

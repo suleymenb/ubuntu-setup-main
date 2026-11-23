@@ -11,3 +11,6 @@
 
 # OS
 .DS_Store
+
+# Your answers from bootstrap.sh (IPs, SSH policy)
+local.yml

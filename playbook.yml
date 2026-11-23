@@ -24,6 +24,10 @@
       tags: [zsh, terminal]
     - role: xrdp
       tags: [xrdp]
+    # Firewall rules for SSH and RDP plus the SSH login policy. After xrdp
+    # (RDP port), before hardening (which switches the firewall on).
+    - role: access
+      tags: [access, ssh, xrdp]
     # Last: it changes firewall policy and disables logging/sleep, so let
     # everything else install and settle first.
     - role: hardening
