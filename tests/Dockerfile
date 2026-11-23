@@ -7,7 +7,9 @@ ENV DEBIAN_FRONTEND=noninteractive container=docker
 
 # Only what the tests drive directly; Ansible itself is installed by
 # bootstrap.sh inside the test, because that is part of what is tested.
-RUN apt-get update \
+# Mirrors hiccup now and then (HTTP 5xx); retry instead of failing the test.
+RUN echo 'Acquire::Retries "5";' > /etc/apt/apt.conf.d/80-retries \
+ && apt-get update \
  && apt-get install -y --no-install-recommends \
       systemd systemd-sysv dbus sudo ca-certificates curl gnupg git \
       python3 python3-yaml python3-jinja2 \
