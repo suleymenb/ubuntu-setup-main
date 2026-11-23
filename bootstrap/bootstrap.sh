@@ -363,7 +363,10 @@ cd "$REPO_ROOT"
 log "Running Ansible playbook (as root via sudo)"
 EXTRA_VARS=()
 [[ -f "$LOCAL_VARS" ]] && EXTRA_VARS=(-e "@$LOCAL_VARS")
-sudo ansible-playbook playbook.yml "${EXTRA_VARS[@]}"
+# Full path: sudo searches only its own secure_path, so an Ansible installed
+# with pip or pipx (in ~/.local/bin) would otherwise be "command not found".
+ANSIBLE_PLAYBOOK="$(command -v ansible-playbook)"
+sudo "$ANSIBLE_PLAYBOOK" playbook.yml "${EXTRA_VARS[@]}"
 
 # --- 6) Verify ---------------------------------------------------------------
 if [[ -x "$REPO_ROOT/verify.sh" ]]; then

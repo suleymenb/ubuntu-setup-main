@@ -64,6 +64,6 @@ jobs:
       # see the list of tasks it prints.
       - name: Second run (idempotence report)
         run: |
-          sudo ansible-playbook playbook.yml | tee second-run.log
+          sudo "$(command -v ansible-playbook)" playbook.yml | tee second-run.log
           echo "::notice::second run: $(grep -Eo 'changed=[0-9]+' second-run.log | tail -n1)"
           grep -E '^changed:' -B1 second-run.log | grep TASK || true
