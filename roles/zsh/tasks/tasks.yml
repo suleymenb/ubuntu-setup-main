@@ -16,6 +16,14 @@
     msg: "No SUDO_USER — zsh role skipped. Run via sudo as your normal user."
   when: zsh_user in ['', 'root']
 
+# Normally already there via apps_packages, but this role must not depend on
+# the apps role having succeeded (or having run at all, with --tags zsh).
+- name: Make sure zsh, git and curl are installed
+  ansible.builtin.apt:
+    name: [zsh, git, curl]
+    state: present
+  when: zsh_user not in ['', 'root']
+
 - name: Configure zsh for the login user
   when: zsh_user not in ['', 'root']
   become: true

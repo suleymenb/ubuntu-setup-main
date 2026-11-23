@@ -49,6 +49,16 @@
          | map(attribute='item') | list | join(', ') }}
   when: net_check.results | selectattr('failed', 'defined') | selectattr('failed') | list | length > 0
 
+# Mirrors and Launchpad PPAs return the odd 5xx. Without retries one hiccup
+# fails a whole role (and everything that needed its packages).
+- name: Let apt retry failed downloads
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/80-ubuntu-setup-retries
+    content: "Acquire::Retries \"5\";\n"
+    owner: root
+    group: root
+    mode: "0644"
+
 - name: Update the apt cache
   ansible.builtin.apt:
     update_cache: true
