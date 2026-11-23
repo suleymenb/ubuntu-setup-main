@@ -1,5 +1,6 @@
 ---
-# JetBrains IDEs from the official apt repo. IDE names live in group_vars.
+# JetBrains IDEs from jetbrains-ppa, an UNOFFICIAL third-party apt repo
+# (not run by JetBrains). IDE names live in group_vars.
 # Repo setup lives here (not preflight) because it is JetBrains-specific.
 
 - name: Fetch the JetBrains repo signing key

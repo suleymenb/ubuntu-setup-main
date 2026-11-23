@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bootstrap-ubuntu-ansible.sh
+# bootstrap.sh
 # 1) Installs Ansible
 # 2) Installs the required collections
 # 3) Runs the playbook

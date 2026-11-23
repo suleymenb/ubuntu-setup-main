@@ -123,8 +123,8 @@ zsh_plugins:
   - tmux
   - zsh-autosuggestions
   - zsh-syntax-highlighting
-# Set zsh as the login shell. Off by default — it changes how you log in, so
-# opt in when you are sure.
+# Set zsh as the login shell for the login user. On by default — set to false
+# to keep your current shell.
 zsh_make_default_shell: true
 
 # --- hardening ---------------------------------------------------------------

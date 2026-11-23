@@ -26,9 +26,9 @@ needed.
 | **preflight** | Ubuntu/Debian, root, disk space, apt mirrors, package names |
 | **desktop** | Installs LXDE, sets the default systemd target to `graphical.target` |
 | **apps** | VLC, VeraCrypt (PPA), C + cross-compile toolchain, offensive-sec tools, terminal tools, Shodan CLI, CLion (snap), Obsidian (GitHub release) |
-| **jetbrains** | JetBrains IDEs from the official apt repo (CLion by default) |
+| **jetbrains** | Extra JetBrains IDEs from the unofficial jetbrains-ppa — none by default (CLion comes from the snap) |
 | **virtualisation** | QEMU/KVM, virt-manager, libvirt groups, KVM acceleration check |
-| **zsh** | Oh My Zsh + plugins for the login user, optional default shell |
+| **zsh** | Oh My Zsh + plugins for the login user, made the default shell (opt-out) |
 | **xrdp** | Installs xrdp, enables and starts it, opens port 3389 in ufw |
 | **hardening** | Disable sleep/logging, ufw deny-incoming — runs last, all opt-out |
 
