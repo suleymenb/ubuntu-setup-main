@@ -34,17 +34,20 @@ log() { printf "\n==> %s\n" "$1"; }
 # to take effect. Refuse to start rather than let that happen silently.
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO_NAME="$(basename "$REPO_ROOT")"
-NEST_COUNT="$(tr '/' '\n' <<<"$REPO_ROOT" | grep -cx "$REPO_NAME" || true)"
+# Nested means: the folder ABOVE this checkout is itself a git checkout of
+# the same name. Counting the name in the path is not enough — CI systems
+# use paths like /work/<repo>/<repo> without any nesting.
+OUTER_ROOT="$(git -C "$REPO_ROOT/.." rev-parse --show-toplevel 2>/dev/null || true)"
 
-if [[ "$NEST_COUNT" -gt 1 ]]; then
+if [[ -n "$OUTER_ROOT" && "$(basename "$OUTER_ROOT")" == "$REPO_NAME" ]]; then
   cat >&2 <<EOF
 
 ==> ERROR: this checkout is nested inside another copy of itself.
 
     $REPO_ROOT
 
-    "$REPO_NAME" appears $NEST_COUNT times in that path, which means you very
-    likely ran "git clone" from inside an existing clone.
+    It sits inside another checkout of "$REPO_NAME" ($OUTER_ROOT), which
+    means you very likely ran "git clone" from inside an existing clone.
 
     Clean it up:
       rm -rf ~/$REPO_NAME
