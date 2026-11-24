@@ -19,6 +19,27 @@
       sudo ansible-playbook playbook.yml
     quiet: true
 
+# --- login user --------------------------------------------------------------
+# The real user behind "sudo ansible-playbook". Several roles write into their
+# home directory, which is NOT always /home/<name> (LDAP, custom homes), so it
+# is read from the passwd database once, here, and reused everywhere.
+- name: Identify the login user
+  ansible.builtin.set_fact:
+    login_user: "{{ ansible_facts.env.SUDO_USER | default('') }}"
+
+- name: Look up the login user's account
+  ansible.builtin.getent:
+    database: passwd
+    key: "{{ login_user }}"
+  when: login_user not in ['', 'root']
+
+- name: Record the login user's home directory and primary group
+  ansible.builtin.set_fact:
+    # passwd fields after the name: password, uid, gid, gecos, home, shell
+    login_home: "{{ ansible_facts.getent_passwd[login_user][4] }}"
+    login_gid: "{{ ansible_facts.getent_passwd[login_user][2] }}"
+  when: login_user not in ['', 'root']
+
 - name: Measure free disk space on /
   ansible.builtin.command: df -BG --output=avail /
   register: df_root
@@ -32,12 +53,37 @@
       at least {{ preflight_min_free_gb }}G is needed for a desktop install.
     quiet: true
 
+# The mirrors to check are read from apt's own sources, not hardcoded: cloud
+# images use their provider's mirror (e.g. azure.archive.ubuntu.com), arm64
+# uses ports.ubuntu.com, and some hosts only allow https. preflight_hosts in
+# group_vars overrides the detection.
+- name: Find the apt mirrors this host uses
+  ansible.builtin.shell: |
+    set -uo pipefail
+    {
+      grep -hE '^[[:space:]]*deb(-src)?[[:space:]]' \
+        /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null \
+        | sed -E 's/\[[^]]*\]//' | awk '{print $2}' || true
+      grep -hE '^[[:space:]]*URIs:' /etc/apt/sources.list.d/*.sources 2>/dev/null \
+        | sed -E 's/^[[:space:]]*URIs:[[:space:]]*//' | tr ' ' '\n' || true
+    } | { grep -E '^https?://' || true; } \
+      | sed -E 's#^(https?)://([^/:]+)(:([0-9]+))?.*#\1 \2 \4#' \
+      | awk '{ p = $3; if (p == "") p = ($1 == "https" ? 443 : 80); print $2 ":" p }' \
+      | sort -u
+  args:
+    executable: /bin/bash
+  register: preflight_apt_mirrors
+  changed_when: false
+  when: (preflight_hosts | default([])) | length == 0
+
 - name: Check that the apt mirrors are reachable
   ansible.builtin.wait_for:
-    host: "{{ item }}"
-    port: 80
+    host: "{{ item.split(':')[0] }}"
+    port: "{{ item.split(':')[1] | default(80) | int }}"
     timeout: 8
-  loop: "{{ preflight_hosts }}"
+  loop: >-
+    {{ preflight_hosts if (preflight_hosts | default([])) | length > 0
+       else preflight_apt_mirrors.stdout_lines | default([]) }}
   register: net_check
   failed_when: false
 
@@ -47,7 +93,7 @@
       Cannot reach these apt mirrors — check your network, proxy or DNS:
       {{ net_check.results | selectattr('failed', 'defined') | selectattr('failed')
          | map(attribute='item') | list | join(', ') }}
-  when: net_check.results | selectattr('failed', 'defined') | selectattr('failed') | list | length > 0
+  when: net_check.results | default([]) | selectattr('failed', 'defined') | selectattr('failed') | list | length > 0
 
 # Mirrors and Launchpad PPAs return the odd 5xx. Without retries one hiccup
 # fails a whole role (and everything that needed its packages).
@@ -109,23 +155,26 @@
   when: ppa_added is changed
 
 # Catching a typo here costs seconds. Catching it during the install costs a
-# partially configured desktop.
+# partially configured desktop. One task with a shell loop rather than one
+# Ansible loop item per package: same check, a fraction of the time.
 - name: Validate every package name exists
-  ansible.builtin.command: "apt-cache show {{ item }}"
-  loop: >-
-    {{ desktop_packages + xrdp_packages + (apps_packages | default([]))
-       + (virt_packages | default([])) }}
+  # argv form: package names are passed as arguments, never pasted into a
+  # shell string. The loop prints each name apt-cache cannot find.
+  ansible.builtin.command:
+    argv: >-
+      {{ ['/bin/bash', '-c', 'for p in "$@"; do apt-cache show "$p" >/dev/null 2>&1 || echo "$p"; done', 'check']
+         + desktop_packages + xrdp_packages + (apps_packages | default([]))
+         + (virt_packages | default([])) }}
   register: pkg_check
   changed_when: false
-  failed_when: false
 
 - name: Report every package name that does not exist
   ansible.builtin.fail:
     msg: |
       These packages are not available from the configured apt sources:
-        {{ pkg_check.results | selectattr('rc', 'ne', 0) | map(attribute='item') | list | join('\n  ') }}
+        {{ pkg_check.stdout_lines | join('\n  ') }}
       Nothing has been installed. Fix the names in group_vars/all.yml.
-  when: pkg_check.results | selectattr('rc', 'ne', 0) | list | length > 0
+  when: pkg_check.stdout_lines | length > 0
 
 - name: Check which optional packages this release has
   ansible.builtin.command: "apt-cache show {{ item }}"
@@ -204,23 +253,25 @@
 
 - name: Find the login user's authorized SSH keys
   ansible.builtin.stat:
-    path: "/home/{{ ansible_facts.env.SUDO_USER | default('') }}/.ssh/authorized_keys"
+    path: "{{ login_home }}/.ssh/authorized_keys"
   register: preflight_authorized_keys
-  when: ssh_key_only | default(false)
+  when:
+    - ssh_key_only | default(false)
+    - login_home is defined
 
 # Turning off passwords with no key in place is the one setting here that
 # locks you out for certain.
 - name: Refuse key-only SSH without an authorized key
   ansible.builtin.fail:
     msg: |
-      ssh_key_only is on, but /home/{{ ansible_facts.env.SUDO_USER | default('<user>') }}/.ssh/authorized_keys
+      ssh_key_only is on, but {{ login_home | default('~<user>') }}/.ssh/authorized_keys
       is missing or empty — turning off passwords now would lock you out.
       From the machine you connect FROM, run:
-        ssh-copy-id {{ ansible_facts.env.SUDO_USER | default('<user>') }}@<this-server>
+        ssh-copy-id {{ login_user | default('<user>', true) }}@<this-server>
       check that "ssh <user>@<this-server>" logs in without a password, then run again.
   when:
     - ssh_key_only | default(false)
-    - (ansible_facts.env.SUDO_USER | default('')) in ['', 'root']
+    - login_home is not defined
       or not preflight_authorized_keys.stat.exists
       or preflight_authorized_keys.stat.size == 0
 

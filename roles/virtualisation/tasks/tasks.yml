@@ -15,18 +15,18 @@
 # sees no hypervisor and every VM action prompts for a password.
 - name: Add the login user to the virtualisation groups
   ansible.builtin.user:
-    name: "{{ ansible_facts.env.SUDO_USER }}"
+    name: "{{ login_user }}"
     groups: "{{ virt_user_groups | join(',') }}"
     append: true
   when:
     - (virt_user_groups | default([])) | length > 0
-    - (ansible_facts.env.SUDO_USER | default('')) not in ['', 'root']
+    - login_home is defined
   register: groups_added
 
 - name: Note that the group change needs a new login
   ansible.builtin.debug:
     msg: >-
-      {{ ansible_facts.env.SUDO_USER }} was added to
+      {{ login_user }} was added to
       {{ virt_user_groups | join(', ') }}. Group membership only applies to new
       sessions — log out and back in (or reboot) before using virt-manager.
   when: groups_added is changed
@@ -37,7 +37,7 @@
       Could not determine a non-root login user, so nobody was added to
       {{ virt_user_groups | join(', ') }}. Add yourself by hand:
       sudo usermod -aG {{ virt_user_groups | join(',') }} $USER
-  when: (ansible_facts.env.SUDO_USER | default('')) in ['', 'root']
+  when: login_home is not defined
 
 # This host may itself be a VM. Without nested virtualisation there is no
 # /dev/kvm, and QEMU falls back to pure emulation — which works, but is slow

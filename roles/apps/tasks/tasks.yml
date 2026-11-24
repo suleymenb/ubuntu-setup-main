@@ -33,18 +33,41 @@
   when: item.rc | default(0) != 0
 
 # --- shodan ------------------------------------------------------------------
-# `shodan init` writes ~/.config/shodan/api_key for the real login user, not
-# root. Skipped entirely when no key is provided — never hardcode it.
-- name: Initialise the Shodan CLI
-  ansible.builtin.command: "shodan init {{ shodan_api_key }}"
-  become: true
-  become_user: "{{ ansible_facts.env.SUDO_USER }}"
+# Writes the key file `shodan init` would write (~/.config/shodan/api_key) for
+# the real login user, not root. Done with copy rather than `shodan init KEY`:
+# a key on a command line is visible to every user via `ps`, and no_log does
+# not hide that. Skipped entirely when no key is provided — never hardcode it.
+- name: Store the Shodan API key for the login user
   when:
     - (shodan_api_key | default('') | length) > 0
-    - (ansible_facts.env.SUDO_USER | default('')) not in ['', 'root']
-  no_log: true
-  changed_when: true
-  failed_when: false
+    - login_home is defined
+  block:
+    # No mode: an existing ~/.config keeps whatever mode the user gave it.
+    # Created explicitly because a parent made by the next task would be
+    # owned by root.
+    - name: Make sure ~/.config exists and belongs to the login user  # noqa: risky-file-permissions
+      ansible.builtin.file:
+        path: "{{ login_home }}/.config"
+        state: directory
+        owner: "{{ login_user }}"
+        group: "{{ login_gid }}"
+
+    - name: Create the Shodan config directory
+      ansible.builtin.file:
+        path: "{{ login_home }}/.config/shodan"
+        state: directory
+        owner: "{{ login_user }}"
+        group: "{{ login_gid }}"
+        mode: "0700"
+
+    - name: Write the Shodan API key
+      ansible.builtin.copy:
+        content: "{{ shodan_api_key }}"
+        dest: "{{ login_home }}/.config/shodan/api_key"
+        owner: "{{ login_user }}"
+        group: "{{ login_gid }}"
+        mode: "0600"
+      no_log: true
 
 - name: Note that Shodan was not initialised
   ansible.builtin.debug:

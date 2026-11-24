@@ -15,8 +15,17 @@
   when: hardening_disable_sleep | default(true) | bool
 
 # --- logging -----------------------------------------------------------------
-# journald first: set Storage=none so nothing is written to disk, then stop and
-# mask the units. rsyslog/auditd are only touched if present.
+# journald: Storage=none means nothing is written to disk or kept in memory,
+# but the daemon itself keeps running. It must: journald owns /dev/log and
+# every service's stdout/stderr, and with it masked, services that log can
+# block on a socket nobody reads. Earlier versions masked it, so it is
+# unmasked here whatever the profile says.
+- name: Make sure journald is not masked
+  ansible.builtin.systemd_service:
+    name: systemd-journald.service
+    masked: false
+    state: started
+
 - name: Set journald storage to none
   ansible.builtin.lineinfile:
     path: /etc/systemd/journald.conf
@@ -27,14 +36,20 @@
   when: hardening_disable_logging | default(true) | bool
   register: journald_conf
 
-- name: Mask the logging services
+- name: Restart journald so it stops storing logs
+  ansible.builtin.systemd_service:
+    name: systemd-journald.service
+    state: restarted
+  when: journald_conf is changed
+
+# rsyslog/auditd write their own files; only touched if present.
+- name: Mask rsyslog and auditd
   ansible.builtin.systemd_service:
     name: "{{ item }}"
     state: stopped
     enabled: false
     masked: true
   loop:
-    - systemd-journald.service
     - rsyslog.service
     - auditd.service
   failed_when: false          # not all of these exist on every install

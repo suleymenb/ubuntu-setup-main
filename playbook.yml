@@ -8,6 +8,18 @@
   # (see the README for why -K is unreliable on Ubuntu's PAM stack)
   become: true
 
+  # Your bootstrap answers (profile, who may connect, SSH policy). Loaded here
+  # so that a plain "sudo ansible-playbook playbook.yml --tags ..." re-run
+  # keeps them; forgetting "-e @local.yml" used to reopen SSH/RDP to anyone,
+  # switch password login back on and reset the profile. pre_tasks run before
+  # the roles; -e still wins over this.
+  pre_tasks:
+    - name: Load your bootstrap answers from local.yml
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/local.yml"
+      when: (playbook_dir ~ '/local.yml') is file
+      tags: always
+
   roles:
     # Validates the environment before anything is installed, so a bad
     # package name or a missing repo fails in seconds instead of minutes.

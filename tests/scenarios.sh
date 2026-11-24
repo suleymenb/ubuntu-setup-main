@@ -58,7 +58,9 @@ check "no SSH login policy file" test ! -e /etc/ssh/sshd_config.d/00-ubuntu-setu
 check "automatic updates on" grep -q 'Unattended-Upgrade "1"' /etc/apt/apt.conf.d/20auto-upgrades
 check "no automatic reboot" grep -q 'Automatic-Reboot "false"' /etc/apt/apt.conf.d/52ubuntu-setup-unattended
 check "fail2ban not set up" test ! -e /etc/fail2ban/jail.d/ubuntu-setup.local
-check "journald stopped (logging off)" bash -c "! systemctl is-active -q systemd-journald"
+check "journald stores nothing (logging off)" grep -qx 'Storage=none' /etc/systemd/journald.conf
+check "journald still running, not masked" systemctl is-active -q systemd-journald
+check_not "rsyslog running (logging off)" systemctl is-active -q rsyslog
 
 # --- 2: key-only without a key ------------------------------------------------
 section "2. Key-only SSH without an authorized key is refused"

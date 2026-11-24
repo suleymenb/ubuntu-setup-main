@@ -19,10 +19,12 @@
 setup_profile: workstation
 
 # --- preflight ---------------------------------------------------------------
-preflight_min_free_gb: 4
-preflight_hosts:
-  - archive.ubuntu.com
-  - security.ubuntu.com
+# LXDE + CLion snap + JDK + QEMU + toolchains need roughly 8-10 GB together,
+# so less than this will most likely run out partway through.
+preflight_min_free_gb: 10
+# Empty = check the mirrors apt is actually configured with. Set entries as
+# "host" (port 80) or "host:port" to check something else instead.
+preflight_hosts: []
 
 # --- desktop -----------------------------------------------------------------
 
@@ -38,17 +40,13 @@ apps_packages:
   - vlc
   - veracrypt
   # C toolchain + cross-compiling / offensive-security tooling
-  - build-essential
-  - gcc
-  - g++
+  - build-essential    # includes gcc, g++, make, libc-dev
   - gdb
-  - make
   - clang
   - git
   - mingw-w64          # cross-compile Windows PE binaries from Linux
   - nasm               # x86 assembler
-  - default-jdk
-  - default-jre
+  - default-jdk        # includes the JRE
   - proxychains4       # note: package is proxychains4, binary is proxychains
   - socat
   - p7zip-full
@@ -57,7 +55,6 @@ apps_packages:
   - wget
   - dirmngr
   - software-properties-common
-  - apt-transport-https
   - lsb-release
   - ca-certificates
   - libfuse-dev
@@ -146,6 +143,17 @@ zsh_plugins:
   - tmux
   - zsh-autosuggestions
   - zsh-syntax-highlighting
+# Pinned versions, so a run installs exactly what was tested rather than
+# whatever is on master today. Bump on purpose.
+# Oh My Zsh has no release tags; this is a commit on master (2026-11).
+zsh_ohmyzsh_version: 93b87c9c9aaae2f56b41a1f7fdf64fc1d603a9b7
+zsh_custom_plugins:
+  - name: zsh-autosuggestions
+    repo: https://github.com/zsh-users/zsh-autosuggestions.git
+    version: v0.7.1
+  - name: zsh-syntax-highlighting
+    repo: https://github.com/zsh-users/zsh-syntax-highlighting.git
+    version: "0.8.0"
 # Set zsh as the login shell for the login user. On by default — set to false
 # to keep your current shell.
 zsh_make_default_shell: true
@@ -211,7 +219,7 @@ dotfiles_install_command: ""
 # --- hardening ---------------------------------------------------------------
 # Privacy / anti-forensics config from the old script.
 hardening_disable_sleep: true       # mask sleep/suspend/hibernate targets
-# journald, rsyslog, auditd off + truncate logs. Only on the workstation
+# journald stores nothing, rsyslog/auditd off, logs truncated. Only on the workstation
 # profile: an analysis VM keeps the trail of what a sample did, and a server
 # needs logs for fail2ban. Setting it to false later turns logging back on.
 hardening_disable_logging: "{{ setup_profile == 'workstation' }}"

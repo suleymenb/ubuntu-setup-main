@@ -30,7 +30,7 @@ whether to block root over SSH (see [Remote access](#remote-access)).
 
 | Role | |
 |---|---|
-| **preflight** | Ubuntu/Debian, root, disk space, apt mirrors, package names |
+| **preflight** | Ubuntu/Debian, root, disk space, the apt mirrors you actually use, package names, login user |
 | **desktop** | Installs LXDE, sets the default systemd target to `graphical.target` |
 | **apps** | VLC, VeraCrypt (PPA), C + cross-compile toolchain, offensive-sec tools, terminal tools, Shodan CLI, CLion (snap), Obsidian (GitHub release) |
 | **jetbrains** | Extra JetBrains IDEs from the unofficial jetbrains-ppa — none by default (CLion comes from the snap) |
@@ -218,16 +218,17 @@ Via the bootstrap script — **no sudo in front**, it handles that itself:
 Or calling Ansible directly, which *does* need sudo:
 
 ```bash
-sudo ansible-playbook playbook.yml -e @local.yml               # everything
-sudo ansible-playbook playbook.yml -e @local.yml --tags access  # one role
-sudo ansible-playbook playbook.yml -e @local.yml --check        # dry run
-./verify.sh                                                      # health check
+sudo ansible-playbook playbook.yml                 # everything
+sudo ansible-playbook playbook.yml --tags access   # one role
+sudo ansible-playbook playbook.yml --check         # dry run
+./verify.sh                                        # health check
 ```
 
-Leave out `-e @local.yml` if you never ran `bootstrap.sh` — then the defaults
-in `group_vars/all.yml` apply (SSH and RDP open to anyone, passwords on).
-`verify.sh` reads `local.yml` itself; run it after a `sudo` to also check the
-firewall rules.
+The playbook loads `local.yml` by itself when it exists, so a re-run always
+keeps your profile and remote-access answers. Without `local.yml` (you never
+ran `bootstrap.sh`) the defaults in `group_vars/all.yml` apply: workstation
+profile, SSH and RDP open to anyone, passwords on. `verify.sh` reads
+`local.yml` too; run it after a `sudo` to also check the firewall rules.
 
 The `sudo` there is deliberate. The two obvious alternatives both fail on
 Ubuntu:
@@ -250,7 +251,9 @@ port is opened, and `--tags access` also runs `fail2ban`, which must not ban
 the addresses you allow in.
 
 **Secrets — never commit them.** The Shodan API key is not stored in the repo.
-Pass it at run time, or export it, or skip it:
+Pass it at run time, or export it, or skip it. The playbook writes it straight
+to `~/.config/shodan/api_key` (mode 0600) instead of running `shodan init KEY`,
+so the key never shows up in the process list:
 
 ```bash
 export SHODAN_API_KEY=your_key
@@ -343,6 +346,15 @@ goes through the Launchpad API over HTTPS. If you hit it in your own tasks:
 sudo add-apt-repository -y ppa:unit193/encryption
 ```
 
+**Services hang, or nothing at all shows up in `journalctl`**
+Older versions of this playbook masked `systemd-journald` on the workstation
+profile. Now it keeps running with `Storage=none` (nothing stored), and
+re-running `--tags hardening` unmasks it. By hand:
+
+```bash
+sudo systemctl unmask --now systemd-journald
+```
+
 **Still text-only after a reboot**
 
 ```bash
@@ -374,6 +386,11 @@ collections/                pinned collections, installed by bootstrap.sh (git-i
 ## Notes
 
 - Everything runs as root via `become: true` in `ansible.cfg`.
+- The login user's home directory and group come from the passwd database
+  (preflight), not `/home/<name>`, so non-standard homes work.
+- Oh My Zsh and its plugins are pinned (`zsh_ohmyzsh_version`,
+  `zsh_custom_plugins` in `group_vars/all.yml`) instead of piping the installer
+  from `master` into a shell.
 - `systemctl set-default` has no Ansible module, so the current target is read
   first and only written when it differs — otherwise every run would report
   "changed" and you could never spot a real one.
@@ -399,4 +416,4 @@ collections/                pinned collections, installed by bootstrap.sh (git-i
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

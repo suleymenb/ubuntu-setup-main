@@ -31,7 +31,8 @@
           datepattern = ^\[%%Y%%m%%d-%%H:%%M:%%S\]
       notify: Restart fail2ban
 
-    # Your own allowed addresses are never banned: mistyping your password    # a few times should not lock you out of your own server.
+    # Your own allowed addresses are never banned: mistyping your password
+    # a few times should not lock you out of your own server.
     - name: Configure the SSH and RDP jails
       ansible.builtin.copy:
         dest: /etc/fail2ban/jail.d/ubuntu-setup.local

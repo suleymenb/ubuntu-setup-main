@@ -67,6 +67,15 @@ else
   G=""; R=""; Y=""; B=""; N=""
 fi
 
+# The real user (also when run under sudo) and their home directory, which is
+# not always /home/<name>.
+login_user="${SUDO_USER:-${USER:-$(id -un)}}"
+login_home="$(getent passwd "$login_user" | cut -d: -f6)"
+login_home="${login_home:-/home/$login_user}"
+
+# A setting as the playbook sees it is "true" (profile expressions rendered).
+is_true() { [[ "$(list_or "$1" "$2" | head -n1)" == "true" ]]; }
+
 section() { printf "\n%s— %s —%s\n" "$B" "$1" "$N"; }
 ok()   { printf "  %s✔%s %-32s %s\n" "$G" "$N" "$1" "${2:-}"; PASS=$((PASS+1)); }
 bad()  { printf "  %s✘%s %-32s %s\n" "$R" "$N" "$1" "${2:-}"; FAIL=$((FAIL+1)); FAILED_ITEMS+=("$1"); }
@@ -94,10 +103,11 @@ else
 fi
 
 target=$(systemctl get-default 2>/dev/null)
-if [[ "$target" == "graphical.target" ]]; then
+want_target=$(list_or desktop_systemd_target "graphical.target" | head -n1)
+if [[ "$target" == "$want_target" ]]; then
   ok "Default systemd target" "$target"
 else
-  bad "Default systemd target" "$target (expected graphical.target)"
+  bad "Default systemd target" "$target (expected $want_target)"
 fi
 
 # --- desktop -----------------------------------------------------------------
@@ -107,10 +117,12 @@ for p in $(list_or desktop_packages "lxde"); do
   check_pkg "$p"
 done
 
-if command -v startlxde >/dev/null 2>&1; then
-  ok "startlxde on PATH"
+session_cmd=$(list_or xrdp_session_command "startlxde" | head -n1)
+session_bin=${session_cmd%% *}
+if command -v "$session_bin" >/dev/null 2>&1; then
+  ok "$session_bin on PATH"
 else
-  warn "startlxde on PATH" "LXDE may not be fully installed"
+  warn "$session_bin on PATH" "the desktop may not be fully installed"
 fi
 
 # --- apps --------------------------------------------------------------------
@@ -159,13 +171,14 @@ fi
 # --- shell -------------------------------------------------------------------
 section "Shell"
 
-login_user="${SUDO_USER:-$USER}"
-if [[ -d "/home/${login_user}/.oh-my-zsh" ]]; then
+if [[ -d "${login_home}/.oh-my-zsh" ]]; then
   ok "Oh My Zsh installed"
 else
   bad "Oh My Zsh installed" "for $login_user"
 fi
-if getent passwd "$login_user" | grep -q '/zsh$'; then
+if ! is_true zsh_make_default_shell true; then
+  :
+elif getent passwd "$login_user" | grep -q '/zsh$'; then
   ok "default shell is zsh"
 else
   warn "default shell is zsh" "$(getent passwd "$login_user" | cut -d: -f7)"
@@ -174,17 +187,26 @@ fi
 # --- hardening ---------------------------------------------------------------
 section "Hardening"
 
-if systemctl is-enabled sleep.target 2>/dev/null | grep -q masked; then
-  ok "sleep masked"
-else
-  warn "sleep masked" "still enabled"
+# Each check only runs when its toggle is on, so turning one off on purpose
+# does not show up as a warning.
+if is_true hardening_disable_sleep true; then
+  if systemctl is-enabled sleep.target 2>/dev/null | grep -q masked; then
+    ok "sleep masked"
+  else
+    warn "sleep masked" "still enabled"
+  fi
 fi
 profile=$(list_or setup_profile "workstation" | head -n1)
-if [[ "$(list_or hardening_disable_logging true | head -n1)" == "true" ]]; then
-  if systemctl is-active systemd-journald >/dev/null 2>&1; then
-    warn "journald disabled" "still running ($profile profile)"
+# With logging off journald keeps running (it owns /dev/log) but stores
+# nothing; what matters is Storage=none.
+if is_true hardening_disable_logging true; then
+  if grep -qx 'Storage=none' /etc/systemd/journald.conf 2>/dev/null; then
+    ok "logging off" "journald stores nothing ($profile profile)"
   else
-    ok "journald disabled" "$profile profile"
+    warn "logging off" "Storage=none not set in journald.conf ($profile profile)"
+  fi
+  if ! systemctl is-active systemd-journald >/dev/null 2>&1; then
+    bad "journald running" "sudo systemctl unmask --now systemd-journald"
   fi
 else
   if systemctl is-active systemd-journald >/dev/null 2>&1; then
@@ -193,10 +215,12 @@ else
     bad "logging on" "journald not running — re-run --tags hardening"
   fi
 fi
-if sudo -n ufw status 2>/dev/null | grep -q "Status: active"; then
-  ok "ufw active"
-else
-  warn "ufw active" "not enabled"
+if is_true hardening_firewall true; then
+  if sudo -n ufw status 2>/dev/null | grep -q "Status: active"; then
+    ok "ufw active"
+  else
+    warn "ufw active" "not enabled (or run with sudo to check)"
+  fi
 fi
 
 # --- updates -----------------------------------------------------------------
@@ -245,7 +269,6 @@ for p in $(list_or virt_packages "qemu-system-x86 libvirt-daemon-system virt-man
 done
 
 # Packages alone are not enough — group membership decides whether it works.
-login_user="${SUDO_USER:-$USER}"
 for g in $(list_or virt_user_groups "libvirt kvm"); do
   if id -nG "$login_user" 2>/dev/null | grep -qw "$g"; then
     ok "$login_user in group $g"
@@ -322,12 +345,13 @@ fi
 
 # ~/.xsession decides what starts after login. Missing it is the classic
 # "I connect but only get a grey screen".
-login_user="${SUDO_USER:-$USER}"
-xsession="/home/${login_user}/.xsession"
-if [[ -f "$xsession" ]]; then
-  ok ".xsession for $login_user" "$(head -n1 "$xsession")"
-else
+xsession="${login_home}/.xsession"
+if [[ ! -f "$xsession" ]]; then
   bad ".xsession for $login_user" "missing — RDP will show a grey screen"
+elif [[ "$(head -n1 "$xsession")" == "$session_cmd" ]]; then
+  ok ".xsession for $login_user" "$session_cmd"
+else
+  bad ".xsession for $login_user" "says '$(head -n1 "$xsession")', expected '$session_cmd'"
 fi
 
 # --- firewall ----------------------------------------------------------------
@@ -401,7 +425,7 @@ if (( FAIL > 0 )); then
     printf "  - %s\n" "$item"
   done
   printf "\nRe-run the playbook, or a single role:\n"
-  printf "  ansible-playbook playbook.yml --tags xrdp\n"
+  printf "  sudo ansible-playbook playbook.yml --tags xrdp\n"
   exit 1
 fi
 

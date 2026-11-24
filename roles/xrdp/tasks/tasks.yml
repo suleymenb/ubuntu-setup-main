@@ -22,16 +22,14 @@
 # xrdp starts whatever ~/.xsession says. With nothing there you authenticate
 # fine and land on an empty grey screen — by far the most common reason people
 # think xrdp is broken. This is written for the real login user, not root.
-- name: Set the RDP session to LXDE for the login user
+- name: Set the RDP session command for the login user
   ansible.builtin.copy:
     content: "{{ xrdp_session_command }}\n"
-    dest: "/home/{{ target_user }}/.xsession"
-    owner: "{{ target_user }}"
-    group: "{{ target_user }}"
+    dest: "{{ login_home }}/.xsession"
+    owner: "{{ login_user }}"
+    group: "{{ login_gid }}"
     mode: "0644"
-  vars:
-    target_user: "{{ ansible_facts.env.SUDO_USER | default(ansible_facts.user_id) }}"
-  when: (ansible_facts.env.SUDO_USER | default('')) not in ['', 'root']
+  when: login_home is defined
 
 - name: Note that no .xsession was written
   ansible.builtin.debug:
@@ -39,7 +37,7 @@
       Could not determine a non-root login user, so ~/.xsession was not written.
       Do it by hand or RDP will show a grey screen:
       echo "{{ xrdp_session_command }}" > ~/.xsession
-  when: (ansible_facts.env.SUDO_USER | default('')) in ['', 'root']
+  when: login_home is not defined
 
 # --- TLS certificate ---------------------------------------------------------
 # By default xrdp uses Ubuntu's self-signed "snakeoil" certificate, so every
