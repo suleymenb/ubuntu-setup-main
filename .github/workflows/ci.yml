@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install linters
+        run: pip install ansible-lint yamllint
+      - name: Install the pinned collections
+        run: ansible-galaxy collection install -r requirements.yml -p collections
+      - name: yamllint
+        run: yamllint .
+      - name: ansible-lint
+        run: ansible-lint
+      - name: shellcheck
+        run: shellcheck bootstrap/bootstrap.sh verify.sh tests/*.sh
+
+  # The roles that decide who can get in, against a real ufw, sshd and
+  # fail2ban in a systemd container, plus bootstrap.sh's questions.
+  container:
+    needs: lint
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        release: ["22.04", "24.04"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Container tests on Ubuntu ${{ matrix.release }}
+        run: ./tests/run.sh ${{ matrix.release }}
+
+  # Everything, for real, the way a user runs it — on GitHub's Ubuntu VMs.
+  full:
+    needs: container
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - name: bootstrap.sh (no prompts)
+        run: ./bootstrap/bootstrap.sh --no-prompt
+      - name: verify.sh
+        run: sudo -E env "SUDO_USER=$USER" ./verify.sh
+      # A second run must not change anything. Reported, not enforced yet:
+      # see the list of tasks it prints.
+      - name: Second run (idempotence report)
+        run: |
+          sudo "$(command -v ansible-playbook)" playbook.yml | tee second-run.log
+          echo "::notice::second run: $(grep -Eo 'changed=[0-9]+' second-run.log | tail -n1)"
+          grep -E '^changed:' -B1 second-run.log | grep TASK || true

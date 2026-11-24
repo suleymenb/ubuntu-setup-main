@@ -1,0 +1,98 @@
+---
+# Bans an address after repeated failed logins on SSH and RDP. fail2ban reads
+# logs, so it needs logging ON — preflight refuses fail2ban together with
+# hardening_disable_logging.
+
+- name: Set up fail2ban
+  when: fail2ban_enabled | bool
+  block:
+    - name: Install fail2ban
+      ansible.builtin.apt:
+        name: fail2ban
+        state: present
+        update_cache: true
+        cache_valid_time: 3600
+
+    # xrdp has no filter in fail2ban itself. xrdp-sesman logs a failed
+    # password as:
+    #   [20251123-11:59:02] [INFO ] AUTHFAIL: user=<name> ip=::ffff:203.0.113.7 port=... time=...
+    - name: Add a filter for failed RDP logins
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/filter.d/ubuntu-setup-xrdp.conf
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by ubuntu-setup (roles/fail2ban).
+          [Definition]
+          failregex = AUTHFAIL: user=\S* ip=(?:::ffff:)?<HOST> port=
+          ignoreregex =
+          # xrdp timestamps look like [20251123-11:59:02]
+          datepattern = ^\[%%Y%%m%%d-%%H:%%M:%%S\]
+      notify: Restart fail2ban
+
+    # Your own allowed addresses are never banned: mistyping your password
+    # a few times should not lock you out of your own server.
+    - name: Configure the SSH and RDP jails
+      ansible.builtin.copy:
+        dest: /etc/fail2ban/jail.d/ubuntu-setup.local
+        owner: root
+        group: root
+        mode: "0644"
+        content: |
+          # Managed by ubuntu-setup (roles/fail2ban) — change the fail2ban_*
+          # settings in group_vars/all.yml instead.
+          [DEFAULT]
+          bantime  = {{ fail2ban_bantime }}
+          findtime = {{ fail2ban_findtime }}
+          maxretry = {{ fail2ban_maxretry }}
+          ignoreip = 127.0.0.1/8 ::1 {{ (access_allowed_from | default([])) | join(' ') }}
+
+          [sshd]
+          enabled = true
+          port    = {{ ssh_port }}
+          backend = systemd
+
+          [ubuntu-setup-xrdp]
+          enabled  = true
+          port     = {{ xrdp_port }}
+          filter   = ubuntu-setup-xrdp
+          logpath  = /var/log/xrdp-sesman.log
+          backend  = auto
+      notify: Restart fail2ban
+
+    # The xrdp jail refuses to start while its log file does not exist yet
+    # (no RDP login has happened), which takes the whole service down.
+    - name: Make sure the xrdp log file exists
+      ansible.builtin.file:
+        path: /var/log/xrdp-sesman.log
+        state: touch
+        owner: root
+        group: adm
+        mode: "0640"
+        modification_time: preserve
+        access_time: preserve
+
+    - name: Enable and start fail2ban
+      ansible.builtin.systemd_service:
+        name: fail2ban
+        enabled: true
+        state: started
+
+- name: Turn fail2ban off
+  when: not (fail2ban_enabled | bool)
+  block:
+    - name: Remove this playbook's jails
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/fail2ban/jail.d/ubuntu-setup.local
+        - /etc/fail2ban/filter.d/ubuntu-setup-xrdp.conf
+
+    - name: Stop fail2ban if it is installed
+      ansible.builtin.systemd_service:
+        name: fail2ban
+        enabled: false
+        state: stopped
+      failed_when: false

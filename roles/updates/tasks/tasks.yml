@@ -1,0 +1,46 @@
+---
+# Automatic security updates via unattended-upgrades. Ubuntu's own
+# 50unattended-upgrades decides WHAT is upgraded (security pocket by default);
+# this role only decides WHETHER it runs and whether it may reboot.
+
+- name: Install unattended-upgrades
+  ansible.builtin.apt:
+    name: unattended-upgrades
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+# Written in both directions: on the analysis-vm profile this sets the
+# periodic runs to "0", so a VM does not change underneath an analysis.
+- name: Switch the daily update and upgrade runs on or off
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/20auto-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      // Managed by ubuntu-setup (roles/updates) — set updates_enabled instead.
+      APT::Periodic::Update-Package-Lists "{{ '1' if updates_enabled | bool else '0' }}";
+      APT::Periodic::Unattended-Upgrade "{{ '1' if updates_enabled | bool else '0' }}";
+
+# A separate file sorts after 50unattended-upgrades, so these values win
+# without editing the package's own config.
+- name: Set the reboot policy for updates
+  ansible.builtin.copy:
+    dest: /etc/apt/apt.conf.d/52ubuntu-setup-unattended
+    owner: root
+    group: root
+    mode: "0644"
+    content: |
+      // Managed by ubuntu-setup (roles/updates).
+      Unattended-Upgrade::Automatic-Reboot "{{ 'true' if updates_auto_reboot | bool else 'false' }}";
+      Unattended-Upgrade::Automatic-Reboot-Time "{{ updates_reboot_time }}";
+      Unattended-Upgrade::Remove-Unused-Kernel-Packages "true";
+      Unattended-Upgrade::Remove-Unused-Dependencies "true";
+
+- name: Show the update policy
+  ansible.builtin.debug:
+    msg: >-
+      Automatic security updates: {{ 'on' if updates_enabled | bool else 'off' }}.
+      {% if updates_enabled | bool %}Reboot when an update needs it:
+      {{ ('yes, at ' ~ updates_reboot_time) if updates_auto_reboot | bool else 'no — check /var/run/reboot-required' }}.{% endif %}

@@ -1,6 +1,6 @@
 ---
 # Thin wrapper. The real work lives in tasks.yml.
-- name: zsh
+- name: Role zsh
   block:
     - name: Run the zsh tasks
       ansible.builtin.include_tasks: tasks.yml

@@ -1,6 +1,6 @@
 ---
 # Thin wrapper. The real work lives in tasks.yml.
-- name: hardening
+- name: Role hardening
   block:
     - name: Run the hardening tasks
       ansible.builtin.include_tasks: tasks.yml

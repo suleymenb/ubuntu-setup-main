@@ -5,7 +5,7 @@
 
 - name: Install apt packages
   ansible.builtin.apt:
-    name: "{{ apps_packages }}"
+    name: "{{ apps_packages + (apps_optional_available | default([])) }}"
     state: present
     update_cache: true
     cache_valid_time: 3600
@@ -33,18 +33,41 @@
   when: item.rc | default(0) != 0
 
 # --- shodan ------------------------------------------------------------------
-# `shodan init` writes ~/.config/shodan/api_key for the real login user, not
-# root. Skipped entirely when no key is provided — never hardcode it.
-- name: Initialise the Shodan CLI
-  ansible.builtin.command: "shodan init {{ shodan_api_key }}"
-  become: true
-  become_user: "{{ ansible_facts.env.SUDO_USER }}"
+# Writes the key file `shodan init` would write (~/.config/shodan/api_key) for
+# the real login user, not root. Done with copy rather than `shodan init KEY`:
+# a key on a command line is visible to every user via `ps`, and no_log does
+# not hide that. Skipped entirely when no key is provided — never hardcode it.
+- name: Store the Shodan API key for the login user
   when:
     - (shodan_api_key | default('') | length) > 0
-    - (ansible_facts.env.SUDO_USER | default('')) not in ['', 'root']
-  no_log: true
-  changed_when: true
-  failed_when: false
+    - login_home is defined
+  block:
+    # No mode: an existing ~/.config keeps whatever mode the user gave it.
+    # Created explicitly because a parent made by the next task would be
+    # owned by root.
+    - name: Make sure ~/.config exists and belongs to the login user  # noqa: risky-file-permissions
+      ansible.builtin.file:
+        path: "{{ login_home }}/.config"
+        state: directory
+        owner: "{{ login_user }}"
+        group: "{{ login_gid }}"
+
+    - name: Create the Shodan config directory
+      ansible.builtin.file:
+        path: "{{ login_home }}/.config/shodan"
+        state: directory
+        owner: "{{ login_user }}"
+        group: "{{ login_gid }}"
+        mode: "0700"
+
+    - name: Write the Shodan API key
+      ansible.builtin.copy:
+        content: "{{ shodan_api_key }}"
+        dest: "{{ login_home }}/.config/shodan/api_key"
+        owner: "{{ login_user }}"
+        group: "{{ login_gid }}"
+        mode: "0600"
+      no_log: true
 
 - name: Note that Shodan was not initialised
   ansible.builtin.debug:
@@ -76,7 +99,9 @@
     label: "{{ item.name }}"
   register: gh_release
   failed_when: false
-  when: (dpkg_arch.stdout | trim) in (item.architectures | default(['amd64']))
+  when: >-
+    (dpkg_arch.stdout | trim) in (item.architectures | default(['amd64']))
+    or (dpkg_arch.stdout | trim) in (item.appimage_match | default({}))
 
 - name: Check which of them are already installed
   ansible.builtin.command: "dpkg-query -W -f=${Version} {{ item.name }}"
@@ -111,12 +136,116 @@
   register: gh_deb_install
   failed_when: false
 
-- name: Report GitHub .debs that were skipped
-  ansible.builtin.debug:
-    msg: >-
-      {{ item.name }} skipped — no {{ item.asset_match }} asset for
-      {{ dpkg_arch.stdout | trim }}. Use the AppImage instead.
+# --- AppImage fallback (e.g. arm64) -------------------------------------------
+# Some apps only publish a .deb for amd64 but do publish an AppImage for other
+# architectures. Installed to /opt/<name>, with a launcher on PATH and in the
+# desktop menu. /opt/<name>/VERSION is compared first, like the .deb above.
+- name: Pick the apps that need an AppImage on this architecture
+  ansible.builtin.set_fact:
+    apps_appimages: "{{ (apps_appimages | default([])) + [item] }}"
   loop: "{{ apps_github_debs | default([]) }}"
   loop_control:
     label: "{{ item.name }}"
-  when: (dpkg_arch.stdout | trim) not in (item.architectures | default(['amd64']))
+  when:
+    - (dpkg_arch.stdout | trim) not in (item.architectures | default(['amd64']))
+    - (dpkg_arch.stdout | trim) in (item.appimage_match | default({}))
+
+- name: Install the AppImages
+  when: (apps_appimages | default([])) | length > 0
+  block:
+    - name: Install the FUSE library AppImages need
+      ansible.builtin.apt:
+        name: "{{ 'libfuse2t64' if (ansible_facts.distribution_version is version('24.04', '>=')) else 'libfuse2' }}"
+        state: present
+
+    - name: Create the install directories
+      ansible.builtin.file:
+        path: "/opt/{{ item.name }}"
+        state: directory
+        mode: "0755"
+      loop: "{{ apps_appimages }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    - name: Read the installed AppImage versions
+      ansible.builtin.slurp:
+        path: "/opt/{{ item.name }}/VERSION"
+      loop: "{{ apps_appimages }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: appimage_installed
+      failed_when: false
+
+    - name: Download the AppImages
+      ansible.builtin.get_url:
+        url: "{{ appimage_url }}"
+        dest: "/opt/{{ item.name }}/{{ item.name }}.AppImage"
+        mode: "0755"
+        force: true
+      vars:
+        release: "{{ (gh_release.results | selectattr('item.name', 'equalto', item.name) | first) | default({}) }}"
+        appimage_url: >-
+          {{ (release.json.assets | default([]))
+             | map(attribute='browser_download_url')
+             | select('search', item.appimage_match[dpkg_arch.stdout | trim])
+             | first | default('') }}
+        latest: "{{ release.json.tag_name | default('') | regex_replace('^v', '') }}"
+        installed: >-
+          {{ (appimage_installed.results | selectattr('item.name', 'equalto', item.name) | first).content
+             | default('') | b64decode | trim }}
+      loop: "{{ apps_appimages }}"
+      loop_control:
+        label: "{{ item.name }}"
+      when:
+        - appimage_url | length > 0
+        - installed != latest
+      register: appimage_download
+
+    - name: Record the installed AppImage versions
+      ansible.builtin.copy:
+        content: "{{ (gh_release.results | selectattr('item.name', 'equalto', item.item.name) | first).json.tag_name | regex_replace('^v', '') }}\n"
+        dest: "/opt/{{ item.item.name }}/VERSION"
+        mode: "0644"
+      loop: "{{ appimage_download.results | default([]) }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+      when: item is changed
+
+    - name: Put the AppImages on PATH
+      ansible.builtin.file:
+        src: "/opt/{{ item.name }}/{{ item.name }}.AppImage"
+        dest: "/usr/local/bin/{{ item.name }}"
+        state: link
+        force: true
+      loop: "{{ apps_appimages }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+    # Electron AppImages cannot use Chrome's setuid sandbox from inside the
+    # read-only image, hence --no-sandbox.
+    - name: Add the AppImages to the desktop menu
+      ansible.builtin.copy:
+        dest: "/usr/share/applications/{{ item.name }}.desktop"
+        mode: "0644"
+        content: |
+          [Desktop Entry]
+          Name={{ item.name | capitalize }}
+          Exec=/opt/{{ item.name }}/{{ item.name }}.AppImage --no-sandbox %U
+          Terminal=false
+          Type=Application
+          Categories=Office;
+      loop: "{{ apps_appimages }}"
+      loop_control:
+        label: "{{ item.name }}"
+
+- name: Report GitHub apps with nothing for this architecture
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.name }} skipped — no .deb or AppImage configured for
+      {{ dpkg_arch.stdout | trim }}.
+  loop: "{{ apps_github_debs | default([]) }}"
+  loop_control:
+    label: "{{ item.name }}"
+  when:
+    - (dpkg_arch.stdout | trim) not in (item.architectures | default(['amd64']))
+    - (dpkg_arch.stdout | trim) not in (item.appimage_match | default({}))

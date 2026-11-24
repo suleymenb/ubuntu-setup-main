@@ -3,7 +3,10 @@
 Turns a headless Ubuntu server into a machine you can reach over RDP. Installs
 LXDE, boots into the graphical target, and sets up xrdp. Safe to re-run.
 
-Tested on Ubuntu 22.04 and 24.04.
+Tested on Ubuntu 22.04 and 24.04 — on every push, see [CI](#ci). `eza` is
+only packaged from 24.04 on, so 22.04 skips it (it is in
+`apps_optional_packages`). On arm64,
+Obsidian is installed from its AppImage (there is no arm64 `.deb`).
 
 ## Quick start
 
@@ -19,23 +22,26 @@ Run it as your **normal user**, not as root — the RDP session is configured fo
 whoever runs it. The script asks for your password once and uses sudo where
 needed.
 
-Before it installs anything it asks three questions — who may connect, whether
-SSH should be key-only, and whether to block root over SSH. See
-[Remote access](#remote-access).
+Before it installs anything it asks what kind of machine this is (see
+[Profiles](#profiles)), who may connect, whether SSH should be key-only, and
+whether to block root over SSH (see [Remote access](#remote-access)).
 
 ## What it does
 
 | Role | |
 |---|---|
-| **preflight** | Ubuntu/Debian, root, disk space, apt mirrors, package names |
+| **preflight** | Ubuntu/Debian, root, disk space, the apt mirrors you actually use, package names, login user |
 | **desktop** | Installs LXDE, sets the default systemd target to `graphical.target` |
 | **apps** | VLC, VeraCrypt (PPA), C + cross-compile toolchain, offensive-sec tools, terminal tools, Shodan CLI, CLion (snap), Obsidian (GitHub release) |
 | **jetbrains** | Extra JetBrains IDEs from the unofficial jetbrains-ppa — none by default (CLion comes from the snap) |
 | **virtualisation** | QEMU/KVM, virt-manager, libvirt groups, KVM acceleration check |
 | **zsh** | Oh My Zsh + plugins for the login user, made the default shell (opt-out) |
+| **dotfiles** | Your own dotfiles repo, cloned and linked into your home — skipped until you set one |
 | **xrdp** | Installs xrdp, enables and starts it |
 | **access** | ufw rules for SSH and RDP (optionally only from your IPs), SSH key-only / no-root login |
-| **hardening** | Disable sleep/logging, ufw deny-incoming — runs last, all opt-out |
+| **updates** | Automatic security updates (unattended-upgrades), optional auto-reboot |
+| **fail2ban** | Bans addresses after repeated failed SSH/RDP logins (server profile) |
+| **hardening** | Disable sleep, logging off/on per profile, ufw deny-incoming — runs last |
 
 Beyond the bare commands, the xrdp role also does the two things that decide
 whether RDP actually works:
@@ -68,6 +74,27 @@ After the reboot, from any RDP client (Microsoft Remote Desktop, Remmina):
 ```
 
 Log in with your normal Linux username and password.
+
+## Profiles
+
+One setting, `setup_profile`, picks sensible defaults for the kind of
+machine. `bootstrap.sh` asks for it; each setting can still be overridden on
+its own in `group_vars/all.yml` or `local.yml`.
+
+| | logging | fail2ban | automatic updates |
+|---|---|---|---|
+| `workstation` (default) | off (anti-forensics) | off | on |
+| `server` | on | on | on |
+| `analysis-vm` | **on** — keep the trail of what a sample did | off | **off** — the VM must not change underneath an analysis |
+
+fail2ban needs logs, so preflight refuses `fail2ban_enabled` together with
+`hardening_disable_logging`. Switching a machine from `workstation` to another
+profile turns logging back on (logs that were already wiped stay gone).
+
+Automatic updates install security updates only, daily. They do not reboot by
+default — a surprise reboot drops your RDP session. Set
+`updates_auto_reboot: true` (at `updates_reboot_time`) if you prefer that;
+otherwise `verify.sh` warns when `/var/run/reboot-required` appears.
 
 ## Remote access
 
@@ -103,7 +130,42 @@ Safety nets, in the playbook itself:
   your current session stays up.
 
 RDP always uses your Linux password, so on a public server restricting the
-source IPs is what actually protects it.
+source IPs is what actually protects it — with the `server` profile, fail2ban
+also bans an address after 5 failed logins within 10 minutes (your allowed
+addresses are never banned).
+
+### Your own RDP certificate
+
+xrdp uses Ubuntu's self-signed certificate by default, so every client warns
+— and a real man-in-the-middle warning looks exactly the same. Point it at
+your own certificate (paths on the server, e.g. from certbot):
+
+```yaml
+xrdp_tls_cert: /etc/letsencrypt/live/rdp.example.com/fullchain.pem
+xrdp_tls_key:  /etc/letsencrypt/live/rdp.example.com/privkey.pem
+```
+
+The files are copied into `/etc/xrdp`, because xrdp cannot read
+`/etc/letsencrypt/live`. Re-run `--tags xrdp` after a renewal.
+
+## Dotfiles
+
+Keep your own `.tmux.conf`, aliases and so on in a git repo, and every new
+machine gets them:
+
+```yaml
+dotfiles_repo: https://github.com/<you>/dotfiles.git
+dotfiles_links:
+  .tmux.conf: tmux/tmux.conf
+  .zshrc: zsh/zshrc
+# or, if the repo has its own installer:
+dotfiles_install_command: ./install.sh
+```
+
+The repo is cloned to `~/.dotfiles` and updated on every run (git refuses if
+you have uncommitted changes there, rather than overwriting them). An existing
+file is moved to `<name>.before-dotfiles` once, never deleted. Once `.zshrc`
+or `.tmux.conf` is linked from your repo, the zsh role stops editing it.
 
 ## Customising
 
@@ -156,16 +218,17 @@ Via the bootstrap script — **no sudo in front**, it handles that itself:
 Or calling Ansible directly, which *does* need sudo:
 
 ```bash
-sudo ansible-playbook playbook.yml -e @local.yml               # everything
-sudo ansible-playbook playbook.yml -e @local.yml --tags access  # one role
-sudo ansible-playbook playbook.yml -e @local.yml --check        # dry run
-./verify.sh                                                      # health check
+sudo ansible-playbook playbook.yml                 # everything
+sudo ansible-playbook playbook.yml --tags access   # one role
+sudo ansible-playbook playbook.yml --check         # dry run
+./verify.sh                                        # health check
 ```
 
-Leave out `-e @local.yml` if you never ran `bootstrap.sh` — then the defaults
-in `group_vars/all.yml` apply (SSH and RDP open to anyone, passwords on).
-`verify.sh` reads `local.yml` itself; run it after a `sudo` to also check the
-firewall rules.
+The playbook loads `local.yml` by itself when it exists, so a re-run always
+keeps your profile and remote-access answers. Without `local.yml` (you never
+ran `bootstrap.sh`) the defaults in `group_vars/all.yml` apply: workstation
+profile, SSH and RDP open to anyone, passwords on. `verify.sh` reads
+`local.yml` too; run it after a `sudo` to also check the firewall rules.
 
 The `sudo` there is deliberate. The two obvious alternatives both fail on
 Ubuntu:
@@ -181,12 +244,16 @@ Running the whole playbook as root sidesteps both: the play's `become` is a
 no-op, and sudo sets `SUDO_USER` so the xrdp role still knows which real user
 gets `~/.xsession`.
 
-Tags: `desktop`, `apps`, `jetbrains`, `virtualisation`, `zsh`, `xrdp`,
-`access` (also `ssh`), `hardening`. Preflight always runs. `--tags xrdp` also
-runs `access`, because that is where the RDP port is opened.
+Tags: `desktop`, `apps`, `jetbrains`, `virtualisation`, `zsh`, `dotfiles`,
+`xrdp`, `access` (also `ssh`), `updates`, `fail2ban`, `hardening`. Preflight
+always runs. `--tags xrdp` also runs `access`, because that is where the RDP
+port is opened, and `--tags access` also runs `fail2ban`, which must not ban
+the addresses you allow in.
 
 **Secrets — never commit them.** The Shodan API key is not stored in the repo.
-Pass it at run time, or export it, or skip it:
+Pass it at run time, or export it, or skip it. The playbook writes it straight
+to `~/.config/shodan/api_key` (mode 0600) instead of running `shodan init KEY`,
+so the key never shows up in the process list:
 
 ```bash
 export SHODAN_API_KEY=your_key
@@ -279,6 +346,15 @@ goes through the Launchpad API over HTTPS. If you hit it in your own tasks:
 sudo add-apt-repository -y ppa:unit193/encryption
 ```
 
+**Services hang, or nothing at all shows up in `journalctl`**
+Older versions of this playbook masked `systemd-journald` on the workstation
+profile. Now it keeps running with `Storage=none` (nothing stored), and
+re-running `--tags hardening` unmasks it. By hand:
+
+```bash
+sudo systemctl unmask --now systemd-journald
+```
+
 **Still text-only after a reboot**
 
 ```bash
@@ -296,21 +372,48 @@ bootstrap/bootstrap.sh      first-run setup, guards against nested clones
 verify.sh                   post-run health check
 roles/
   preflight/                validates everything up front (not wrapped)
-  desktop/ apps/ jetbrains/ virtualisation/ zsh/ xrdp/ access/ hardening/
+  desktop/ apps/ jetbrains/ virtualisation/ zsh/ dotfiles/ xrdp/ access/
+  updates/ fail2ban/ hardening/
     tasks/main.yml          block/rescue wrapper
     tasks/tasks.yml         the actual work
   xrdp/handlers/            restart xrdp only when something changed
   access/handlers/          reload sshd only when the login policy changed
+tests/                      container tests, also run by CI
+.github/workflows/ci.yml    lint, container tests and a full run per Ubuntu release
+collections/                pinned collections, installed by bootstrap.sh (git-ignored)
 ```
 
 ## Notes
 
 - Everything runs as root via `become: true` in `ansible.cfg`.
+- The login user's home directory and group come from the passwd database
+  (preflight), not `/home/<name>`, so non-standard homes work.
+- Oh My Zsh and its plugins are pinned (`zsh_ohmyzsh_version`,
+  `zsh_custom_plugins` in `group_vars/all.yml`) instead of piping the installer
+  from `master` into a shell.
 - `systemctl set-default` has no Ansible module, so the current target is read
   first and only written when it differs — otherwise every run would report
   "changed" and you could never spot a real one.
 - The firewall rule is only applied when ufw is installed *and* active.
 
+## CI
+
+`.github/workflows/ci.yml` runs on every push and pull request:
+
+- **lint** — `ansible-lint`, `yamllint` and `shellcheck`.
+- **container tests** — `tests/run.sh` in Ubuntu 22.04 and 24.04 containers:
+  the access, fail2ban, updates and hardening roles against a real ufw and
+  sshd (lockout guards included), and `bootstrap.sh`'s questions driven
+  through a terminal. Run them locally with Docker:
+
+  ```bash
+  ./tests/run.sh 24.04
+  ```
+
+- **full run** — the real `bootstrap.sh --no-prompt` and `verify.sh` on
+  GitHub's Ubuntu 22.04 and 24.04 runners (actual VMs with systemd), then the
+  playbook a second time to report anything that is not idempotent.
+
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

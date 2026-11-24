@@ -3,7 +3,7 @@
 #
 # Wrapping the role in block/rescue means a failure here is recorded and the
 # play continues with the next role, instead of aborting everything after it.
-- name: apps
+- name: Role apps
   block:
     - name: Run the apps tasks
       ansible.builtin.include_tasks: tasks.yml

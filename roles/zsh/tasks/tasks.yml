@@ -1,77 +1,143 @@
 ---
-# Oh My Zsh and friends. zsh/tmux/eza/colorize are installed via apps_packages;
-# this role does the per-user config.
+# Oh My Zsh and friends. zsh/tmux/colorize come from apps_packages and eza from
+# apps_optional_packages; this role does the per-user config.
 #
 # Everything runs as the login user, never root — otherwise Oh My Zsh lands in
 # /root and your actual shell stays plain. The whole role is skipped if we
-# cannot identify a real user.
-
-- name: Identify the login user
-  ansible.builtin.set_fact:
-    zsh_user: "{{ ansible_facts.env.SUDO_USER | default('') }}"
+# cannot identify a real user (login_user/login_home come from preflight).
 
 - name: Skip zsh setup if run without a real user
   ansible.builtin.debug:
     msg: "No SUDO_USER — zsh role skipped. Run via sudo as your normal user."
-  when: zsh_user in ['', 'root']
+  when: login_home is not defined
+
+# Normally already there via apps_packages, but this role must not depend on
+# the apps role having succeeded (or having run at all, with --tags zsh).
+- name: Make sure zsh and git are installed
+  ansible.builtin.apt:
+    name: [zsh, git]
+    state: present
+  when: login_home is defined
 
 - name: Configure zsh for the login user
-  when: zsh_user not in ['', 'root']
+  when: login_home is defined
   become: true
-  become_user: "{{ zsh_user }}"
+  become_user: "{{ login_user }}"
   block:
-    - name: Resolve the user's home directory
-      ansible.builtin.set_fact:
-        zsh_home: "/home/{{ zsh_user }}"
+    # A git checkout pinned to a known commit instead of piping the installer
+    # from master into sh: you get exactly the code that was tested, and
+    # bumping it is a deliberate one-line change in group_vars. An existing
+    # install (the installer also makes a git checkout) is left as it is, so
+    # Oh My Zsh's own updater can keep it current.
+    - name: Check out Oh My Zsh at the pinned commit
+      ansible.builtin.git:
+        repo: https://github.com/ohmyzsh/ohmyzsh.git
+        dest: "{{ login_home }}/.oh-my-zsh"
+        version: "{{ zsh_ohmyzsh_version }}"
+        update: false
 
-    - name: Install Oh My Zsh (unattended)
-      ansible.builtin.shell: |
-        set -o pipefail
-        RUNZSH=no CHSH=no KEEP_ZSHRC=yes \
-          sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)"
-      args:
-        executable: /bin/bash
-        creates: "{{ zsh_home }}/.oh-my-zsh"
+    # What the installer does when there is no .zshrc yet. An existing one
+    # (or one linked from your dotfiles) is kept, same as KEEP_ZSHRC=yes.
+    - name: Create .zshrc from the Oh My Zsh template if there is none
+      ansible.builtin.copy:
+        src: "{{ login_home }}/.oh-my-zsh/templates/zshrc.zsh-template"
+        dest: "{{ login_home }}/.zshrc"
+        remote_src: true
+        force: false
+        mode: "0644"
 
-    - name: Clone the custom plugins
+    # No failed_when: false here. A plugin that fails to clone but is still
+    # listed in plugins=() makes every new shell print an error, so a failure
+    # belongs in the end-of-run report.
+    - name: Clone the custom plugins at pinned versions
       ansible.builtin.git:
         repo: "{{ item.repo }}"
-        dest: "{{ zsh_home }}/.oh-my-zsh/custom/plugins/{{ item.name }}"
+        dest: "{{ login_home }}/.oh-my-zsh/custom/plugins/{{ item.name }}"
+        version: "{{ item.version }}"
         depth: 1
-        version: master
-      loop:
-        - { name: zsh-autosuggestions, repo: "https://github.com/zsh-users/zsh-autosuggestions" }
-        - { name: zsh-syntax-highlighting, repo: "https://github.com/zsh-users/zsh-syntax-highlighting" }
-      failed_when: false
+      loop: "{{ zsh_custom_plugins }}"
+      loop_control:
+        label: "{{ item.name }} {{ item.version }}"
 
-    - name: Set the plugins line
-      ansible.builtin.lineinfile:
-        path: "{{ zsh_home }}/.zshrc"
-        regexp: '^plugins='
-        line: "plugins=({{ zsh_plugins | join(' ') }})"
-        create: true
+    # A .zshrc or .tmux.conf that is a symlink comes from your dotfiles repo
+    # (dotfiles role). Editing it here would write into that repo, so those
+    # are left alone — your dotfiles are in charge of them.
+    - name: Check whether .zshrc and .tmux.conf come from your dotfiles
+      ansible.builtin.stat:
+        path: "{{ login_home }}/{{ item }}"
+      loop: [.zshrc, .tmux.conf]
+      register: zsh_rc_stat
 
-    - name: Add colorize + tmux settings and the eza alias
-      ansible.builtin.blockinfile:
-        path: "{{ zsh_home }}/.zshrc"
-        marker: "# {mark} ANSIBLE_ZSH"
-        create: true
-        block: |
-          ZSH_COLORIZE_STYLE="colorful"
-          ZSH_TMUX_AUTOSTART=true
-          alias la="eza -la --color=always --group-directories-first"
+    - name: Configure .zshrc
+      when: not (zsh_rc_stat.results[0].stat.islnk | default(false))
+      block:
+        # The eza plugin prints a complaint in every new shell when eza is
+        # missing (it is not packaged before Ubuntu 24.04), so drop it then.
+        - name: Check whether eza is installed
+          ansible.builtin.command: which eza
+          register: zsh_eza
+          changed_when: false
+          failed_when: false
+
+        - name: Set the plugins line
+          ansible.builtin.lineinfile:
+            path: "{{ login_home }}/.zshrc"
+            regexp: '^plugins='
+            line: >-
+              plugins=({{ (zsh_plugins if zsh_eza.rc == 0 else zsh_plugins | reject('equalto', 'eza'))
+                         | join(' ') }})
+            create: true
+            mode: "0644"
+
+        # Earlier versions put the block at the end of .zshrc. blockinfile
+        # updates a block where it is and never moves it, so take a
+        # misplaced one out first and let the next task re-add it in place.
+        - name: Read .zshrc
+          ansible.builtin.slurp:
+            path: "{{ login_home }}/.zshrc"
+          register: zsh_rc_content
+          failed_when: false
+
+        - name: Remove the settings block if it sits after oh-my-zsh.sh
+          ansible.builtin.blockinfile:
+            path: "{{ login_home }}/.zshrc"
+            marker: "# {mark} ANSIBLE_ZSH"
+            state: absent
+          vars:
+            zsh_rc_text: "{{ (zsh_rc_content.content | default('')) | b64decode }}"
+          when:
+            - "'# BEGIN ANSIBLE_ZSH' in zsh_rc_text"
+            - "'source $ZSH/oh-my-zsh.sh' in zsh_rc_text"
+            - zsh_rc_text.find('# BEGIN ANSIBLE_ZSH') > zsh_rc_text.find('source $ZSH/oh-my-zsh.sh')
+
+        # The colorize and tmux plugins read these while Oh My Zsh loads, so
+        # they must come BEFORE "source $ZSH/oh-my-zsh.sh". At the end of the
+        # file, where blockinfile puts things by default, they did nothing.
+        - name: Add colorize + tmux settings and the eza alias
+          ansible.builtin.blockinfile:
+            path: "{{ login_home }}/.zshrc"
+            marker: "# {mark} ANSIBLE_ZSH"
+            insertbefore: '^source \$ZSH/oh-my-zsh\.sh'
+            create: true
+            mode: "0644"
+            block: |
+              ZSH_COLORIZE_STYLE="colorful"
+              ZSH_TMUX_AUTOSTART={{ 'true' if zsh_tmux_autostart | default(true) else 'false' }}
+              command -v eza >/dev/null && alias la="eza -la --color=always --group-directories-first"
 
     - name: Point tmux at zsh
       ansible.builtin.lineinfile:
-        path: "{{ zsh_home }}/.tmux.conf"
+        path: "{{ login_home }}/.tmux.conf"
         line: "set-option -g default-shell /bin/zsh"
         create: true
+        mode: "0644"
+      when: not (zsh_rc_stat.results[1].stat.islnk | default(false))
 
 # chsh needs root, so it sits outside the become_user block.
 - name: Make zsh the default shell
   ansible.builtin.user:
-    name: "{{ zsh_user }}"
+    name: "{{ login_user }}"
     shell: /bin/zsh
   when:
-    - zsh_user not in ['', 'root']
+    - login_home is defined
     - zsh_make_default_shell | default(true)

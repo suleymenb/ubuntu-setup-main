@@ -5,6 +5,7 @@
 #
 # Reload, not restart: existing sessions — including the one you may be
 # running this over — stay up.
-- name: Reload ssh
+# The systemd module has no try-reload-or-restart, hence the command.
+- name: Reload ssh  # noqa: command-instead-of-module
   ansible.builtin.command: systemctl try-reload-or-restart ssh.service
   changed_when: true

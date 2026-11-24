@@ -20,6 +20,7 @@
 - name: Set the default systemd target to graphical
   ansible.builtin.command: "systemctl set-default {{ desktop_systemd_target }}"
   when: current_target.stdout | trim != desktop_systemd_target
+  changed_when: true          # only runs when the target actually differs
   register: target_set
 
 # The target only takes effect at boot, so record that a reboot is due and let
